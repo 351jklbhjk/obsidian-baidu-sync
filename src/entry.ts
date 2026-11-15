@@ -20,6 +20,7 @@ const nativeSync = createNativeSync({
   Modal,
   Setting,
   Platform,
+  schedule: (fn: () => void, ms: number) => window.setTimeout(fn, ms),
 });
 
 nativeSync.install({

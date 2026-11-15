@@ -71,12 +71,8 @@ export class ExportConfigModal extends Modal {
                 copyBtnEl.disabled = false;
               }
 
-              try {
-                await navigator.clipboard.writeText(code);
-                new Notice("✅ 加密配对码已生成并自动复制到剪贴板！");
-              } catch {
-                new Notice("✅ 加密配对码已生成，请在下方文本框手动复制！");
-              }
+              codeAreaEl?.select();
+              new Notice("✅ 加密配对码已生成并选中，请按 Ctrl+C 复制！");
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
               new Notice(`生成失败: ${msg}`);
@@ -98,15 +94,10 @@ export class ExportConfigModal extends Modal {
       .addButton((btn) => {
         copyBtnEl = btn.buttonEl;
         btn.buttonEl.disabled = true;
-        btn.setButtonText("📋 再次复制到剪贴板").onClick(async () => {
+        btn.setButtonText("📋 选中配对码").onClick(() => {
           if (!this.generatedCode) return;
-          try {
-            await navigator.clipboard.writeText(this.generatedCode);
-            new Notice("✅ 已复制到剪贴板！");
-          } catch {
-            codeAreaEl?.select();
-            new Notice("复制失败，请长按下方文本框手动全选复制！");
-          }
+          codeAreaEl?.select();
+          new Notice("已选中配对码，请按 Ctrl+C 复制！");
         });
       });
   }

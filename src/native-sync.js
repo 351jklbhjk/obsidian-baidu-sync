@@ -1,13 +1,15 @@
 /* Native Baidu API reconciliation. Bundled by build-native.py. No shared index. */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- Baidu API responses are dynamic and this module is the untyped transport boundary. */
 function createNativeSync(deps) {
-  const {requestUrl, md5, encryptData, decryptData, isEncrypted, buildMultipartFormData, crypto, Modal, Setting, Platform = {isWin:false}} = deps;
-  const later = (fn, ms) => (typeof window !== "undefined" ? window.setTimeout(fn, ms) : globalThis.setTimeout(fn, ms));
-  const sleep = ms => new Promise(r => later(r, ms));
+  const {requestUrl, md5, encryptData, decryptData, isEncrypted, buildMultipartFormData, crypto, Modal, Setting, Platform = {isWin:false}, schedule} = deps;
+  if (typeof schedule !== "function") throw new Error("schedule dependency required");
+  const sleep = ms => new Promise(r => schedule(r, ms));
+  const hasControl = s => Array.from(String(s)).some(ch => ch.charCodeAt(0) < 32);
   const fail = message => { throw new Error(message); };
   const safeError = e => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, '$1=[redacted]');
   const hash = async b => Array.from(new Uint8Array(await crypto().subtle.digest('SHA-256', b)), n => n.toString(16).padStart(2,'0')).join('');
   const basePath = p => {
-    if (typeof p !== 'string' || !p.startsWith('/') || p.includes('\\') || /[\x00-\x1f]/.test(p)) fail('无效云端根目录');
+    if (typeof p !== 'string' || !p.startsWith('/') || p.includes('\\') || hasControl(p)) fail('无效云端根目录');
     const v = p.replace(/\/+$/, '');
     if (!v || v.split('/').slice(1).some(x => !x || x === '.' || x === '..')) fail('请选择独立同步目录，不能使用网盘根目录');
     return v;
@@ -15,7 +17,7 @@ function createNativeSync(deps) {
   const relative = (p, base) => {
     if (typeof p !== 'string' || !p.startsWith(base + '/')) fail('API 返回同步目录之外的路径');
     const r = p.slice(base.length+1);
-    if (r.split('/').some(x => !x || x==='.' || x==='..') || /[\\\x00-\x1f]/.test(r)) fail('API 返回不安全路径');
+    if (r.split('/').some(x => !x || x==='.' || x==='..') || r.includes('\\') || hasControl(r)) fail('API 返回不安全路径');
     return r;
   };
   const reserved = p => p === '.baidu-sync-index.json' || p.startsWith('.baidu-native-') || p.startsWith('.claudian/') || p === '.claudian' || p.startsWith('.agents/') || p === '.agents' || p.startsWith('.sync-vault/') || p === '.sync-vault';
@@ -40,7 +42,7 @@ function createNativeSync(deps) {
         let response;
         try {
           response=await requestUrl({url:url.toString(),method:form?'POST':'GET',headers:{'User-Agent':'pan.baidu.com',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),throw:false});
-        } catch(e) { last=new Error('网络请求失败'); if(options.noRetry) throw last; await this.pause(1000*2**attempt);continue; }
+        } catch { last=new Error('网络请求失败'); if(options.noRetry) throw last; await this.pause(1000*2**attempt);continue; }
         let data; try { data=response.json; } catch { fail('API 响应不是 JSON'); }
         const errno=data?.errno ?? data?.error_code;
         if(response.status===200 && errno===0) return data;
@@ -159,7 +161,7 @@ function createNativeSync(deps) {
           try {const r=await requestUrl({url:u.toString(),method:'POST',headers:{'Content-Type':multipart.contentType,'User-Agent':'pan.baidu.com'},body:multipart.body,throw:false});
             if(r.status===200 && !r.json.errno && !r.json.error_code && r.json.md5===blocks[i]) {ok=true;break;}
             if([110,111,-6].includes(r.json.errno??r.json.error_code)) await this.oauth.refreshTokenIfNeeded(true);
-          }catch(e){} await this.pause(1000*2**attempt);
+          }catch { ok = false; } await this.pause(1000*2**attempt);
         }
         if(!ok) fail(`分片 ${i} 上传或 MD5 校验失败；保留 uploadid 供重试`);
       }
@@ -296,7 +298,7 @@ function createNativeSync(deps) {
         const a=await this.api.lookup(oldRemotePath,this.base),b=await this.api.lookup(newRemotePath,this.base);
         if(!a&&b)return b;
         if(a&&b)fail('云端重命名后新旧路径同时存在');
-        await new Promise(r=>later(r,1000));
+        await new Promise(r=>schedule(r,1000));
       }
       fail('云端文件夹重命名尚未完成，保留记录待重试');
     }

@@ -6,7 +6,7 @@ const fs=require('node:fs'),vm=require('node:vm');
 const bytes=s=>Uint8Array.from(Buffer.from(s)).buffer;
 const text=b=>Buffer.from(b).toString();
 const md5=b=>createHash('md5').update(Buffer.from(b)).digest('hex');
-const deps={crypto:()=>webcrypto,md5,isEncrypted:()=>false,encryptData:async b=>b,decryptData:async b=>b,buildMultipartFormData:b=>({body:b,contentType:'multipart/form-data'}),requestUrl:async()=>{throw Error('no mock')}};
+const deps={crypto:()=>webcrypto,md5,isEncrypted:()=>false,encryptData:async b=>b,decryptData:async b=>b,buildMultipartFormData:b=>({body:b,contentType:'multipart/form-data'}),requestUrl:async()=>{throw Error('no mock')},schedule:setTimeout};
 const N=createNativeSync(deps);
 const r=(path='a.md',id=1,rev='opaque',size=3)=>({path,remotePath:'/root/'+path,fsId:id,size,mtime:1000,md5:rev,isdir:0});
 const l=(path='a.md',hash='same')=>({path,hash,mtime:100,size:3});

@@ -38,16 +38,17 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var require_native_sync = __commonJS({
   "src/native-sync.js"(exports, module2) {
     function createNativeSync2(deps) {
-      const { requestUrl: requestUrl4, md5: md52, encryptData: encryptData2, decryptData: decryptData2, isEncrypted: isEncrypted2, buildMultipartFormData: buildMultipartFormData2, crypto: crypto2, Modal: Modal4, Setting: Setting5, Platform: Platform2 = { isWin: false } } = deps;
-      const later = (fn, ms) => typeof window !== "undefined" ? window.setTimeout(fn, ms) : globalThis.setTimeout(fn, ms);
-      const sleep = (ms) => new Promise((r) => later(r, ms));
+      const { requestUrl: requestUrl4, md5: md52, encryptData: encryptData2, decryptData: decryptData2, isEncrypted: isEncrypted2, buildMultipartFormData: buildMultipartFormData2, crypto: crypto2, Modal: Modal4, Setting: Setting5, Platform: Platform2 = { isWin: false }, schedule } = deps;
+      if (typeof schedule !== "function") throw new Error("schedule dependency required");
+      const sleep = (ms) => new Promise((r) => schedule(r, ms));
+      const hasControl = (s) => Array.from(String(s)).some((ch) => ch.charCodeAt(0) < 32);
       const fail = (message) => {
         throw new Error(message);
       };
       const safeError = (e) => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, "$1=[redacted]");
       const hash = async (b) => Array.from(new Uint8Array(await crypto2().subtle.digest("SHA-256", b)), (n) => n.toString(16).padStart(2, "0")).join("");
       const basePath = (p) => {
-        if (typeof p !== "string" || !p.startsWith("/") || p.includes("\\") || /[\x00-\x1f]/.test(p)) fail("\u65E0\u6548\u4E91\u7AEF\u6839\u76EE\u5F55");
+        if (typeof p !== "string" || !p.startsWith("/") || p.includes("\\") || hasControl(p)) fail("\u65E0\u6548\u4E91\u7AEF\u6839\u76EE\u5F55");
         const v = p.replace(/\/+$/, "");
         if (!v || v.split("/").slice(1).some((x) => !x || x === "." || x === "..")) fail("\u8BF7\u9009\u62E9\u72EC\u7ACB\u540C\u6B65\u76EE\u5F55\uFF0C\u4E0D\u80FD\u4F7F\u7528\u7F51\u76D8\u6839\u76EE\u5F55");
         return v;
@@ -55,7 +56,7 @@ var require_native_sync = __commonJS({
       const relative = (p, base) => {
         if (typeof p !== "string" || !p.startsWith(base + "/")) fail("API \u8FD4\u56DE\u540C\u6B65\u76EE\u5F55\u4E4B\u5916\u7684\u8DEF\u5F84");
         const r = p.slice(base.length + 1);
-        if (r.split("/").some((x) => !x || x === "." || x === "..") || /[\\\x00-\x1f]/.test(r)) fail("API \u8FD4\u56DE\u4E0D\u5B89\u5168\u8DEF\u5F84");
+        if (r.split("/").some((x) => !x || x === "." || x === "..") || r.includes("\\") || hasControl(r)) fail("API \u8FD4\u56DE\u4E0D\u5B89\u5168\u8DEF\u5F84");
         return r;
       };
       const reserved = (p) => p === ".baidu-sync-index.json" || p.startsWith(".baidu-native-") || p.startsWith(".claudian/") || p === ".claudian" || p.startsWith(".agents/") || p === ".agents" || p.startsWith(".sync-vault/") || p === ".sync-vault";
@@ -83,7 +84,7 @@ var require_native_sync = __commonJS({
             let response;
             try {
               response = await requestUrl4({ url: url.toString(), method: form ? "POST" : "GET", headers: { "User-Agent": "pan.baidu.com", ...form ? { "Content-Type": "application/x-www-form-urlencoded" } : {} }, ...form ? { body: new URLSearchParams(form).toString() } : {}, throw: false });
-            } catch (e) {
+            } catch {
               last = new Error("\u7F51\u7EDC\u8BF7\u6C42\u5931\u8D25");
               if (options.noRetry) throw last;
               await this.pause(1e3 * 2 ** attempt);
@@ -262,7 +263,8 @@ var require_native_sync = __commonJS({
                   break;
                 }
                 if ([110, 111, -6].includes(r.json.errno ?? r.json.error_code)) await this.oauth.refreshTokenIfNeeded(true);
-              } catch (e) {
+              } catch {
+                ok = false;
               }
               await this.pause(1e3 * 2 ** attempt);
             }
@@ -513,7 +515,7 @@ var require_native_sync = __commonJS({
             const a = await this.api.lookup(oldRemotePath, this.base), b = await this.api.lookup(newRemotePath, this.base);
             if (!a && b) return b;
             if (a && b) fail("\u4E91\u7AEF\u91CD\u547D\u540D\u540E\u65B0\u65E7\u8DEF\u5F84\u540C\u65F6\u5B58\u5728");
-            await new Promise((r) => later(r, 1e3));
+            await new Promise((r) => schedule(r, 1e3));
           }
           fail("\u4E91\u7AEF\u6587\u4EF6\u5939\u91CD\u547D\u540D\u5C1A\u672A\u5B8C\u6210\uFF0C\u4FDD\u7559\u8BB0\u5F55\u5F85\u91CD\u8BD5");
         }
@@ -1233,12 +1235,8 @@ var ExportConfigModal = class extends import_obsidian.Modal {
           if (copyBtnEl) {
             copyBtnEl.disabled = false;
           }
-          try {
-            await navigator.clipboard.writeText(code);
-            new import_obsidian.Notice("\u2705 \u52A0\u5BC6\u914D\u5BF9\u7801\u5DF2\u751F\u6210\u5E76\u81EA\u52A8\u590D\u5236\u5230\u526A\u8D34\u677F\uFF01");
-          } catch {
-            new import_obsidian.Notice("\u2705 \u52A0\u5BC6\u914D\u5BF9\u7801\u5DF2\u751F\u6210\uFF0C\u8BF7\u5728\u4E0B\u65B9\u6587\u672C\u6846\u624B\u52A8\u590D\u5236\uFF01");
-          }
+          codeAreaEl?.select();
+          new import_obsidian.Notice("\u2705 \u52A0\u5BC6\u914D\u5BF9\u7801\u5DF2\u751F\u6210\u5E76\u9009\u4E2D\uFF0C\u8BF7\u6309 Ctrl+C \u590D\u5236\uFF01");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           new import_obsidian.Notice(`\u751F\u6210\u5931\u8D25: ${msg}`);
@@ -1256,15 +1254,10 @@ var ExportConfigModal = class extends import_obsidian.Modal {
     new import_obsidian.Setting(contentEl).addButton((btn) => {
       copyBtnEl = btn.buttonEl;
       btn.buttonEl.disabled = true;
-      btn.setButtonText("\u{1F4CB} \u518D\u6B21\u590D\u5236\u5230\u526A\u8D34\u677F").onClick(async () => {
+      btn.setButtonText("\u{1F4CB} \u9009\u4E2D\u914D\u5BF9\u7801").onClick(() => {
         if (!this.generatedCode) return;
-        try {
-          await navigator.clipboard.writeText(this.generatedCode);
-          new import_obsidian.Notice("\u2705 \u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F\uFF01");
-        } catch {
-          codeAreaEl?.select();
-          new import_obsidian.Notice("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u957F\u6309\u4E0B\u65B9\u6587\u672C\u6846\u624B\u52A8\u5168\u9009\u590D\u5236\uFF01");
-        }
+        codeAreaEl?.select();
+        new import_obsidian.Notice("\u5DF2\u9009\u4E2D\u914D\u5BF9\u7801\uFF0C\u8BF7\u6309 Ctrl+C \u590D\u5236\uFF01");
       });
     });
   }
@@ -3126,7 +3119,8 @@ var nativeSync = (0, import_native_sync.createNativeSync)({
   crypto: getCrypto,
   Modal: import_obsidian8.Modal,
   Setting: import_obsidian8.Setting,
-  Platform: import_obsidian8.Platform
+  Platform: import_obsidian8.Platform,
+  schedule: (fn, ms) => window.setTimeout(fn, ms)
 });
 nativeSync.install({
   SyncEngine,
