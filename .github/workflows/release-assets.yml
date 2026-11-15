@@ -1,0 +1,33 @@
+name: Release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  attach-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build plugin zip
+        run: |
+          mkdir -p dist
+          cp main.js manifest.json styles.css dist/
+          (cd dist && zip -r ../baidu-netdisk-sync-${GITHUB_REF_NAME}.zip .)
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+          files: |
+            main.js
+            manifest.json
+            styles.css
+            baidu-netdisk-sync-*.zip
