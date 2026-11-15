@@ -67,12 +67,10 @@ export default class BaiduSyncPlugin extends Plugin {
 
     // Setup Left Ribbon Icon
     this.ribbonIconEl = this.addRibbonIcon("cloud", "百度网盘同步", async () => {
-      new Notice("正在启动百度网盘同步...");
-      const res = await this.engine.startSync(false);
-      if (res.success) {
-        new Notice("百度网盘同步完成！");
+      if (this.settings.ribbonAction === "syncNow") {
+        await this.runManualSync();
       } else {
-        new Notice("百度网盘同步失败，请检查同步日志");
+        new SyncLogModal(this.app, this.engine).open();
       }
     });
 
@@ -91,8 +89,7 @@ export default class BaiduSyncPlugin extends Plugin {
       id: "baidu-sync-now",
       name: "立即执行同步 (Sync Now)",
       callback: async () => {
-        new Notice("正在启动百度网盘同步...");
-        await this.engine.startSync(false);
+        await this.runManualSync();
       }
     });
 
@@ -207,6 +204,7 @@ export default class BaiduSyncPlugin extends Plugin {
         file.path.includes("native-state.json") ||
         file.path.includes("native-plan.json") ||
         file.path.includes("native-renames.json") ||
+        file.path.includes("/baidu-sync/") ||
         file.path.includes("workspace")
       )
         return;
@@ -228,6 +226,30 @@ export default class BaiduSyncPlugin extends Plugin {
 
   private needsSyncPathSetup(): boolean {
     return !this.settings.onboardingComplete || !isWebdavSyncPath(this.settings.remoteBasePath);
+  }
+
+  private async runManualSync(): Promise<void> {
+    if (this.engine.isSyncing()) {
+      new Notice("同步正在进行，请稍候");
+      return;
+    }
+    new Notice("正在启动百度网盘同步...");
+    const res = (await this.engine.startSync(false)) as {
+      success: boolean;
+      busy?: boolean;
+      setupRequired?: boolean;
+      cancelled?: boolean;
+    };
+    if (this.engine.isSyncing() || res.busy) {
+      new Notice("同步正在进行，请稍候");
+      return;
+    }
+    if (res.setupRequired || res.cancelled) return;
+    if (res.success) {
+      new Notice("百度网盘同步完成！");
+    } else {
+      new Notice("同步未完成，请查看同步日志");
+    }
   }
 
   private openSyncPathSetup(): void {

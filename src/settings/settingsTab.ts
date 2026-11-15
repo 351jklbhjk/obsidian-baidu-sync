@@ -245,6 +245,20 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("5. 同步触发机制").setHeading();
 
     new Setting(containerEl)
+      .setName("左侧云图标点击行为")
+      .setDesc("选择点击左侧云图标时打开同步日志，还是立即开始同步")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("openLog", "打开同步日志")
+          .addOption("syncNow", "立即执行同步")
+          .setValue(this.plugin.settings.ribbonAction)
+          .onChange(async (value) => {
+            this.plugin.settings.ribbonAction = value === "syncNow" ? "syncNow" : "openLog";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("启动时自动同步")
       .setDesc("打开 Obsidian 时自动在后台执行一次静默同步")
       .addToggle((toggle) =>

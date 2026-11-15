@@ -207,16 +207,25 @@ function createNativeSync(deps) {
   class Runner {
     constructor(engine) {
       this.e=engine;this.app=engine.app;this.adapter=this.app.vault.adapter;this.api=new Api(engine.client.oauth);
-      const dir=engine.manifest.manifestFilePath.slice(0,engine.manifest.manifestFilePath.lastIndexOf('/'));
-      this.statePath=dir+'/native-state.json';this.planPath=dir+'/native-plan.json';this.renamesPath=dir+'/native-renames.json';this.renameQueue=Promise.resolve();this.stopped=false;
+      const legacyDir=engine.manifest.manifestFilePath.slice(0,engine.manifest.manifestFilePath.lastIndexOf('/'));
+      this.stateDir=this.app.vault.configDir+'/baidu-sync/baidu-netdisk-sync-plus';
+      this.statePath=this.stateDir+'/native-state.json';this.planPath=this.stateDir+'/native-plan.json';this.renamesPath=this.stateDir+'/native-renames.json';
+      this.legacyStatePath=legacyDir+'/native-state.json';this.legacyRenamesPath=legacyDir+'/native-renames.json';
+      this.renameQueue=Promise.resolve();this.stopped=false;
     }
     log(level,message){this.e.addLog(level,message);}
-    async persist(){await this.adapter.write(this.statePath,JSON.stringify(this.state));}
+    async ensureStateDir(){let current='';for(const part of this.stateDir.split('/')){current=current?current+'/'+part:part;if(!await this.adapter.exists(current))await this.adapter.mkdir(current);}}
+    async persist(){await this.ensureStateDir();await this.adapter.write(this.statePath,JSON.stringify(this.state));}
     async load(settings) {
       const u=await this.api.request('https://pan.baidu.com/rest/2.0/xpan/nas',{method:'uinfo'});
       if(!u.uk)fail('无法确认网盘账号，停止同步');
       this.base=basePath(settings.remoteBasePath, validateSyncPath);
       const scope=JSON.stringify([String(u.uk),this.base,settings.appKey,!!settings.enableE2EE]);
+      await this.ensureStateDir();
+      if(!await this.adapter.exists(this.statePath) && await this.adapter.exists(this.legacyStatePath)) {
+        await this.adapter.write(this.statePath,await this.adapter.read(this.legacyStatePath));
+        this.log('info','同步记录已迁移到稳定目录，后续插件更新不会重新扫描');
+      }
       let state;
       if(await this.adapter.exists(this.statePath)) {try{state=JSON.parse(await this.adapter.read(this.statePath));}catch{fail('本地同步基线损坏，请先恢复 native-state.json');}}
       if(state && state.version!==2)fail('本地同步基线版本不支持');
@@ -225,7 +234,7 @@ function createNativeSync(deps) {
       for(const [p,b] of Object.entries(state.files)) {relative(this.base+'/'+p,this.base);if(!b.local?.hash||!b.remote||b.remote.remotePath!==this.base+'/'+p)fail('本地同步基线条目无效');}
       this.state=state;this.settings={...settings};this.e.filter.updateSettings(settings);
     }
-    ignored(p){return reserved(p)||this.e.filter.shouldIgnore(p);}
+    ignored(p){const stateRoot=this.app.vault.configDir+'/baidu-sync';return p===stateRoot||p.startsWith(stateRoot+'/')||reserved(p)||this.e.filter.shouldIgnore(p);}
     async localFile(path) {
       relative(this.base+'/'+path,this.base);
       const s=await this.adapter.stat(path);if(!s)return null;if(s.type!=='file')fail('预期文件的位置存在目录：'+path);
@@ -281,12 +290,14 @@ function createNativeSync(deps) {
     }
     async record(path,l,r){this.state.files[path]={local:l,remote:r};await this.persist();}
     async loadRenames(){
+      await this.ensureStateDir();
+      if(!await this.adapter.exists(this.renamesPath) && await this.adapter.exists(this.legacyRenamesPath))await this.adapter.write(this.renamesPath,await this.adapter.read(this.legacyRenamesPath));
       if(!await this.adapter.exists(this.renamesPath))return[];
       let d;try{d=JSON.parse(await this.adapter.read(this.renamesPath));}catch{fail('本机重命名记录损坏');}
       if(!d||d.version!==1||!Array.isArray(d.entries))fail('本机重命名记录版本不支持');
       return d.entries.filter(e=>e&&typeof e.oldPath==='string'&&typeof e.newPath==='string'&&e.oldPath!==e.newPath&&(e.kind==='file'||e.kind==='folder'));
     }
-    async saveRenames(entries){await this.adapter.write(this.renamesPath,JSON.stringify({version:1,entries}));}
+    async saveRenames(entries){await this.ensureStateDir();await this.adapter.write(this.renamesPath,JSON.stringify({version:1,entries}));}
     async recordRename(oldPath,newPath,kind){
       this.renameQueue=this.renameQueue.then(()=>this._recordRename(oldPath,newPath,kind),()=>this._recordRename(oldPath,newPath,kind));
       return this.renameQueue;
@@ -448,7 +459,7 @@ function createNativeSync(deps) {
     }
     async run({preview=false,confirm=false,silent=false,trigger=''}={}) {
       const e=this.e;if(this.stopped)return {success:false,stopped:true};if(e.isSyncing())return {success:false,busy:true};
-      e.setState('preparing','同步准备');const stats={uploaded:0,downloaded:0,deleted:0,errors:0,pending:0,conflicts:0};
+      e.setState('preparing','同步准备');const stats={uploaded:0,downloaded:0,deleted:0,adopted:0,errors:0,pending:0,conflicts:0};
       try {
         await this.load(e.getSettings());this.runId=Date.now()+'-'+Math.random().toString(36).slice(2,8);
         this.log('info','同步目录：'+this.base);
@@ -481,14 +492,18 @@ function createNativeSync(deps) {
         const firstTransfers=!this.state.adopted&&items.some(x=>!['ADOPT','FORGET'].includes(x.action));
         if(confirm && (firstTransfers||items.some(x=>x.action.startsWith('DELETE_'))) && !await this.confirm(items)){e.setState('idle','已取消');return {success:false,cancelled:true};}
         e.setState('syncing','执行双向同步');
+        const adopted=items.filter(x=>x.action==='ADOPT');
+        if(adopted.length){for(const x of adopted)this.state.files[x.path]={local:x.local,remote:x.remote};await this.persist();stats.adopted=adopted.length;this.log('info',`内容一致：${stats.adopted} 项，已建立同步记录`);}
         for(const x of items){
+          if(x.action==='ADOPT')continue;
           if(x.action.startsWith('DELETE_') && !confirm){stats.pending++;this.log('warn','删除待手动确认：'+x.path);continue;}
           try {await this.execute(x);this.log('success',itemLabel(x)+'：'+x.path);if(x.action==='UPLOAD')stats.uploaded++;else if(x.action==='DOWNLOAD')stats.downloaded++;else if(x.action.startsWith('DELETE_'))stats.deleted++;}
           catch(err){stats.errors++;this.log('error',x.path+'：'+safeError(err));break;}
         }
         if(!stats.errors){this.state.adopted=true;this.state.lastSync=Date.now();await this.persist();}
         const conflictText=stats.conflicts?`，${stats.conflicts} 项冲突待处理`:'';
-        const summary=stats.errors?`同步中断：成功项目已保存，失败 ${stats.errors} 项`:stats.pending?`同步完成：${stats.pending} 项删除待确认${conflictText}`:`同步完成：上传 ${stats.uploaded}，下载 ${stats.downloaded}，删除 ${stats.deleted}${conflictText}`;
+        const adoptedText=stats.adopted?`一致 ${stats.adopted}，`:'';
+        const summary=stats.errors?`同步中断：成功项目已保存，失败 ${stats.errors} 项`:stats.pending?`同步完成：${stats.pending} 项删除待确认${conflictText}`:`同步完成：${adoptedText}上传 ${stats.uploaded}，下载 ${stats.downloaded}，删除 ${stats.deleted}${conflictText}`;
         this.log(stats.errors?'error':stats.pending?'warn':'success',summary);
         e.setState(stats.errors?'error':'idle',stats.errors?'同步中断，成功项目已保存':stats.pending?`${stats.pending} 项删除待审阅`:(stats.conflicts?`${stats.conflicts} 项冲突待处理`:'同步完成'));
         return {success:stats.errors===0 && stats.pending===0 && stats.conflicts===0,stats};

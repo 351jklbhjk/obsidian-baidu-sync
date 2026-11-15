@@ -15,6 +15,15 @@ shared remote index.
   transferring: identical files only establish the device's sync baseline.
 - First transfers show the target folder and operations for confirmation.
   New files and modified files are labeled separately in the sync log.
+- The per-device sync baseline is stored in
+  `.obsidian/baidu-sync/baidu-netdisk-sync-plus/`, outside the plugin folder, so
+  plugin updates keep the baseline and do not trigger a full rescan. A legacy
+  baseline inside the plugin folder is migrated automatically.
+- The left ribbon icon can open the sync log (default) or start a sync, selected
+  with the **Ribbon click action** setting. Starting a sync while another sync is
+  running shows an informational notice.
+- Identical files are recorded as one summary line instead of one log line per
+  file.
 
 - Per-device baseline with SHA-256 local content hashes and cloud revision
   metadata.

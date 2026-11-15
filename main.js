@@ -329,17 +329,28 @@ var require_native_sync = __commonJS({
           this.app = engine.app;
           this.adapter = this.app.vault.adapter;
           this.api = new Api(engine.client.oauth);
-          const dir = engine.manifest.manifestFilePath.slice(0, engine.manifest.manifestFilePath.lastIndexOf("/"));
-          this.statePath = dir + "/native-state.json";
-          this.planPath = dir + "/native-plan.json";
-          this.renamesPath = dir + "/native-renames.json";
+          const legacyDir = engine.manifest.manifestFilePath.slice(0, engine.manifest.manifestFilePath.lastIndexOf("/"));
+          this.stateDir = this.app.vault.configDir + "/baidu-sync/baidu-netdisk-sync-plus";
+          this.statePath = this.stateDir + "/native-state.json";
+          this.planPath = this.stateDir + "/native-plan.json";
+          this.renamesPath = this.stateDir + "/native-renames.json";
+          this.legacyStatePath = legacyDir + "/native-state.json";
+          this.legacyRenamesPath = legacyDir + "/native-renames.json";
           this.renameQueue = Promise.resolve();
           this.stopped = false;
         }
         log(level, message) {
           this.e.addLog(level, message);
         }
+        async ensureStateDir() {
+          let current = "";
+          for (const part of this.stateDir.split("/")) {
+            current = current ? current + "/" + part : part;
+            if (!await this.adapter.exists(current)) await this.adapter.mkdir(current);
+          }
+        }
         async persist() {
+          await this.ensureStateDir();
           await this.adapter.write(this.statePath, JSON.stringify(this.state));
         }
         async load(settings) {
@@ -347,6 +358,11 @@ var require_native_sync = __commonJS({
           if (!u.uk) fail("\u65E0\u6CD5\u786E\u8BA4\u7F51\u76D8\u8D26\u53F7\uFF0C\u505C\u6B62\u540C\u6B65");
           this.base = basePath(settings.remoteBasePath, validateSyncPath);
           const scope = JSON.stringify([String(u.uk), this.base, settings.appKey, !!settings.enableE2EE]);
+          await this.ensureStateDir();
+          if (!await this.adapter.exists(this.statePath) && await this.adapter.exists(this.legacyStatePath)) {
+            await this.adapter.write(this.statePath, await this.adapter.read(this.legacyStatePath));
+            this.log("info", "\u540C\u6B65\u8BB0\u5F55\u5DF2\u8FC1\u79FB\u5230\u7A33\u5B9A\u76EE\u5F55\uFF0C\u540E\u7EED\u63D2\u4EF6\u66F4\u65B0\u4E0D\u4F1A\u91CD\u65B0\u626B\u63CF");
+          }
           let state;
           if (await this.adapter.exists(this.statePath)) {
             try {
@@ -370,7 +386,8 @@ var require_native_sync = __commonJS({
           this.e.filter.updateSettings(settings);
         }
         ignored(p) {
-          return reserved(p) || this.e.filter.shouldIgnore(p);
+          const stateRoot = this.app.vault.configDir + "/baidu-sync";
+          return p === stateRoot || p.startsWith(stateRoot + "/") || reserved(p) || this.e.filter.shouldIgnore(p);
         }
         async localFile(path) {
           relative(this.base + "/" + path, this.base);
@@ -471,6 +488,8 @@ var require_native_sync = __commonJS({
           await this.persist();
         }
         async loadRenames() {
+          await this.ensureStateDir();
+          if (!await this.adapter.exists(this.renamesPath) && await this.adapter.exists(this.legacyRenamesPath)) await this.adapter.write(this.renamesPath, await this.adapter.read(this.legacyRenamesPath));
           if (!await this.adapter.exists(this.renamesPath)) return [];
           let d;
           try {
@@ -482,6 +501,7 @@ var require_native_sync = __commonJS({
           return d.entries.filter((e) => e && typeof e.oldPath === "string" && typeof e.newPath === "string" && e.oldPath !== e.newPath && (e.kind === "file" || e.kind === "folder"));
         }
         async saveRenames(entries) {
+          await this.ensureStateDir();
           await this.adapter.write(this.renamesPath, JSON.stringify({ version: 1, entries }));
         }
         async recordRename(oldPath, newPath, kind) {
@@ -768,7 +788,7 @@ var require_native_sync = __commonJS({
           if (this.stopped) return { success: false, stopped: true };
           if (e.isSyncing()) return { success: false, busy: true };
           e.setState("preparing", "\u540C\u6B65\u51C6\u5907");
-          const stats = { uploaded: 0, downloaded: 0, deleted: 0, errors: 0, pending: 0, conflicts: 0 };
+          const stats = { uploaded: 0, downloaded: 0, deleted: 0, adopted: 0, errors: 0, pending: 0, conflicts: 0 };
           try {
             await this.load(e.getSettings());
             this.runId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
@@ -836,7 +856,15 @@ var require_native_sync = __commonJS({
               return { success: false, cancelled: true };
             }
             e.setState("syncing", "\u6267\u884C\u53CC\u5411\u540C\u6B65");
+            const adopted = items.filter((x) => x.action === "ADOPT");
+            if (adopted.length) {
+              for (const x of adopted) this.state.files[x.path] = { local: x.local, remote: x.remote };
+              await this.persist();
+              stats.adopted = adopted.length;
+              this.log("info", `\u5185\u5BB9\u4E00\u81F4\uFF1A${stats.adopted} \u9879\uFF0C\u5DF2\u5EFA\u7ACB\u540C\u6B65\u8BB0\u5F55`);
+            }
             for (const x of items) {
+              if (x.action === "ADOPT") continue;
               if (x.action.startsWith("DELETE_") && !confirm) {
                 stats.pending++;
                 this.log("warn", "\u5220\u9664\u5F85\u624B\u52A8\u786E\u8BA4\uFF1A" + x.path);
@@ -860,7 +888,8 @@ var require_native_sync = __commonJS({
               await this.persist();
             }
             const conflictText = stats.conflicts ? `\uFF0C${stats.conflicts} \u9879\u51B2\u7A81\u5F85\u5904\u7406` : "";
-            const summary = stats.errors ? `\u540C\u6B65\u4E2D\u65AD\uFF1A\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58\uFF0C\u5931\u8D25 ${stats.errors} \u9879` : stats.pending ? `\u540C\u6B65\u5B8C\u6210\uFF1A${stats.pending} \u9879\u5220\u9664\u5F85\u786E\u8BA4${conflictText}` : `\u540C\u6B65\u5B8C\u6210\uFF1A\u4E0A\u4F20 ${stats.uploaded}\uFF0C\u4E0B\u8F7D ${stats.downloaded}\uFF0C\u5220\u9664 ${stats.deleted}${conflictText}`;
+            const adoptedText = stats.adopted ? `\u4E00\u81F4 ${stats.adopted}\uFF0C` : "";
+            const summary = stats.errors ? `\u540C\u6B65\u4E2D\u65AD\uFF1A\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58\uFF0C\u5931\u8D25 ${stats.errors} \u9879` : stats.pending ? `\u540C\u6B65\u5B8C\u6210\uFF1A${stats.pending} \u9879\u5220\u9664\u5F85\u786E\u8BA4${conflictText}` : `\u540C\u6B65\u5B8C\u6210\uFF1A${adoptedText}\u4E0A\u4F20 ${stats.uploaded}\uFF0C\u4E0B\u8F7D ${stats.downloaded}\uFF0C\u5220\u9664 ${stats.deleted}${conflictText}`;
             this.log(stats.errors ? "error" : stats.pending ? "warn" : "success", summary);
             e.setState(stats.errors ? "error" : "idle", stats.errors ? "\u540C\u6B65\u4E2D\u65AD\uFF0C\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58" : stats.pending ? `${stats.pending} \u9879\u5220\u9664\u5F85\u5BA1\u9605` : stats.conflicts ? `${stats.conflicts} \u9879\u51B2\u7A81\u5F85\u5904\u7406` : "\u540C\u6B65\u5B8C\u6210");
             return { success: stats.errors === 0 && stats.pending === 0 && stats.conflicts === 0, stats };
@@ -985,6 +1014,7 @@ var DEFAULT_SETTINGS = {
   syncIntervalMinutes: 10,
   syncOnSave: false,
   syncDebounceSeconds: 5,
+  ribbonAction: "openLog",
   syncObsidianConfig: true,
   syncPlugins: true,
   syncThemes: true,
@@ -1604,6 +1634,12 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
     });
     new import_obsidian3.Setting(containerEl).setName("5. \u540C\u6B65\u89E6\u53D1\u673A\u5236").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u5DE6\u4FA7\u4E91\u56FE\u6807\u70B9\u51FB\u884C\u4E3A").setDesc("\u9009\u62E9\u70B9\u51FB\u5DE6\u4FA7\u4E91\u56FE\u6807\u65F6\u6253\u5F00\u540C\u6B65\u65E5\u5FD7\uFF0C\u8FD8\u662F\u7ACB\u5373\u5F00\u59CB\u540C\u6B65").addDropdown(
+      (dropdown) => dropdown.addOption("openLog", "\u6253\u5F00\u540C\u6B65\u65E5\u5FD7").addOption("syncNow", "\u7ACB\u5373\u6267\u884C\u540C\u6B65").setValue(this.plugin.settings.ribbonAction).onChange(async (value) => {
+        this.plugin.settings.ribbonAction = value === "syncNow" ? "syncNow" : "openLog";
+        await this.plugin.saveSettings();
+      })
+    );
     new import_obsidian3.Setting(containerEl).setName("\u542F\u52A8\u65F6\u81EA\u52A8\u540C\u6B65").setDesc("\u6253\u5F00 Obsidian \u65F6\u81EA\u52A8\u5728\u540E\u53F0\u6267\u884C\u4E00\u6B21\u9759\u9ED8\u540C\u6B65").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncOnStartup).onChange(async (val) => {
         this.plugin.settings.syncOnStartup = val;
@@ -3002,11 +3038,19 @@ var SyncLogModal = class extends import_obsidian7.Modal {
     new import_obsidian7.Setting(contentEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u65E5\u5FD7").setHeading();
     const syncSetting = new import_obsidian7.Setting(contentEl).setName("\u7ACB\u5373\u6267\u884C\u540C\u6B65").setDesc("\u624B\u52A8\u89E6\u53D1\u5168\u91CF\u5BF9\u6BD4\u4E0E\u589E\u91CF\u53CC\u5411\u540C\u6B65").addButton((btn) => {
       btn.setButtonText("\u5F00\u59CB\u540C\u6B65").setCta().onClick(async () => {
+        if (this.engine.isSyncing()) {
+          new import_obsidian7.Notice("\u540C\u6B65\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u5019");
+          return;
+        }
         btn.setDisabled(true);
         btn.setButtonText("\u540C\u6B65\u4E2D...");
-        await this.engine.startSync(false);
-        btn.setDisabled(false);
-        btn.setButtonText("\u5F00\u59CB\u540C\u6B65");
+        try {
+          const res = await this.engine.startSync(false);
+          if (res.busy) new import_obsidian7.Notice("\u540C\u6B65\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u5019");
+        } finally {
+          btn.setDisabled(false);
+          btn.setButtonText("\u5F00\u59CB\u540C\u6B65");
+        }
       });
     });
     this.statusDescEl = syncSetting.descEl;
@@ -3124,12 +3168,10 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       new SyncLogModal(this.app, this.engine).open();
     });
     this.ribbonIconEl = this.addRibbonIcon("cloud", "\u767E\u5EA6\u7F51\u76D8\u540C\u6B65", async () => {
-      new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
-      const res = await this.engine.startSync(false);
-      if (res.success) {
-        new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
+      if (this.settings.ribbonAction === "syncNow") {
+        await this.runManualSync();
       } else {
-        new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u540C\u6B65\u65E5\u5FD7");
+        new SyncLogModal(this.app, this.engine).open();
       }
     });
     this.engine.onStateChange((state) => {
@@ -3145,8 +3187,7 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       id: "baidu-sync-now",
       name: "\u7ACB\u5373\u6267\u884C\u540C\u6B65 (Sync Now)",
       callback: async () => {
-        new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
-        await this.engine.startSync(false);
+        await this.runManualSync();
       }
     });
     this.addCommand({
@@ -3237,7 +3278,7 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
       if (Date.now() < this.startupGraceUntil) return;
       if (this.engine.isSyncing()) return;
-      if (file.path.includes("sync_manifest.json") || file.path.includes("native-state.json") || file.path.includes("native-plan.json") || file.path.includes("native-renames.json") || file.path.includes("workspace"))
+      if (file.path.includes("sync_manifest.json") || file.path.includes("native-state.json") || file.path.includes("native-plan.json") || file.path.includes("native-renames.json") || file.path.includes("/baidu-sync/") || file.path.includes("workspace"))
         return;
       if (this.saveDebounceTimer !== null) {
         window.clearTimeout(this.saveDebounceTimer);
@@ -3253,6 +3294,24 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
   }
   needsSyncPathSetup() {
     return !this.settings.onboardingComplete || !isWebdavSyncPath(this.settings.remoteBasePath);
+  }
+  async runManualSync() {
+    if (this.engine.isSyncing()) {
+      new import_obsidian8.Notice("\u540C\u6B65\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u5019");
+      return;
+    }
+    new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
+    const res = await this.engine.startSync(false);
+    if (this.engine.isSyncing() || res.busy) {
+      new import_obsidian8.Notice("\u540C\u6B65\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u5019");
+      return;
+    }
+    if (res.setupRequired || res.cancelled) return;
+    if (res.success) {
+      new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
+    } else {
+      new import_obsidian8.Notice("\u540C\u6B65\u672A\u5B8C\u6210\uFF0C\u8BF7\u67E5\u770B\u540C\u6B65\u65E5\u5FD7");
+    }
   }
   openSyncPathSetup() {
     new SyncPathSetupModal(this.app, this).open();

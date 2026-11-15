@@ -175,6 +175,19 @@ test('fresh installation adopts identical cloud files without uploading; next sc
  runner.api.download=async()=>assert.fail('unchanged baseline should need no download');
  assert.deepEqual(await runner.scan(),[]);
 });
+test('adopt entries are committed in one batch with one summary log',async()=>{
+ const {runner,e}=fixture();const logs=[];e.addLog=(level,message)=>logs.push([level,message]);runner.load=async()=>{};
+ runner.scan=async()=>[{action:'ADOPT',path:'a.md',local:l('a.md'),remote:r('a.md')},{action:'ADOPT',path:'b.md',local:l('b.md'),remote:r('b.md')}];
+ const result=await runner.run({confirm:false});assert(result.success);assert.equal(result.stats.adopted,2);assert.equal(Object.keys(runner.state.files).length,2);
+ assert(logs.some(([level,message])=>level==='info'&&message==='内容一致：2 项，已建立同步记录'));
+ assert(!logs.some(([,message])=>message.includes('内容一致，建立同步记录：a.md')));
+});
+test('sync state lives outside the plugin folder and migrates the legacy file',async()=>{
+ const {runner,adapter}=fixture();assert(runner.statePath.includes('/baidu-sync/'));assert(!runner.statePath.includes('/plugins/'));
+ const legacy='.obsidian/plugins/baidu-netdisk-sync/native-state.json';const state={version:2,scope:JSON.stringify(['123','/root','key',false]),adopted:true,files:{},uploads:{}};
+ await adapter.write(legacy,JSON.stringify(state));runner.api.request=async()=>({errno:0,uk:123});
+ await runner.load({remoteBasePath:'/root',appKey:'key'});assert.equal(runner.state.adopted,true);assert(await adapter.exists(runner.statePath));
+});
 test('timestamp-only local change causes no transfer',async()=>{
  const {runner,adapter,files}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md');
  runner.state.files={'a.md':{local,remote:r()}};files.get('a.md').t+=10000;

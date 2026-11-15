@@ -1,4 +1,4 @@
-import { App, Modal, Setting } from "obsidian";
+import { App, Modal, Notice, Setting } from "obsidian";
 import { SyncEngine, SyncLogEntry, SyncState } from "../sync/engine";
 
 export class SyncLogModal extends Modal {
@@ -26,11 +26,19 @@ export class SyncLogModal extends Modal {
           .setButtonText("开始同步")
           .setCta()
           .onClick(async () => {
+            if (this.engine.isSyncing()) {
+              new Notice("同步正在进行，请稍候");
+              return;
+            }
             btn.setDisabled(true);
             btn.setButtonText("同步中...");
-            await this.engine.startSync(false);
-            btn.setDisabled(false);
-            btn.setButtonText("开始同步");
+            try {
+              const res = (await this.engine.startSync(false)) as { busy?: boolean };
+              if (res.busy) new Notice("同步正在进行，请稍候");
+            } finally {
+              btn.setDisabled(false);
+              btn.setButtonText("开始同步");
+            }
           });
       });
 
