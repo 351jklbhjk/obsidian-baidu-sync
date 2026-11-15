@@ -1,9 +1,9 @@
 {
   "id": "baidu-netdisk-sync",
   "name": "Baidu Netdisk Sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.6.6",
-  "description": "Baidu Netdisk two-way sync with per-device baselines, conflict choice table, reviewed deletions and resumable uploads. Based on owl234's plugin.",
+  "description": "Baidu Netdisk two-way sync with per-device baselines, conflict choice table, resumable uploads and explicit rename handling. Based on owl234's plugin.",
   "author": "351jklbhjk",
   "authorUrl": "https://github.com/351jklbhjk",
   "isDesktopOnly": false
