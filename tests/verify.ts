@@ -5,6 +5,7 @@ import { SyncFilter } from "../src/sync/filter";
 import { DEFAULT_SETTINGS } from "../src/settings/settings";
 import { exportEncryptedConfig, importEncryptedConfig } from "../src/crypto/configShare";
 import { encryptData, decryptData, deriveKey, LEGACY_PBKDF2_ITERATIONS, isEncrypted } from "../src/crypto/e2ee";
+import { isWebdavSyncPath, normalizeWebdavPath, webdavPathError } from "../src/settings/syncPath";
 
 function testMD5() {
   console.log("-> Testing MD5...");
@@ -57,6 +58,20 @@ function testFilter() {
   assert.strictEqual(filter2.shouldIgnore("temp2/file.txt"), false);
 
   console.log("   SyncFilter tests passed!");
+}
+
+function testSyncPath() {
+  console.log("-> Testing WebDAV sync path...");
+  assert.strictEqual(normalizeWebdavPath("/WebDAV/"), "/WebDAV/");
+  assert.strictEqual(normalizeWebdavPath("/WebDAV/Obsidian/"), "/WebDAV/Obsidian");
+  assert.strictEqual(isWebdavSyncPath("/WebDAV/Obsidian"), true);
+  assert.strictEqual(isWebdavSyncPath("/WebDAV/Obsidian/Sub"), true);
+  assert.strictEqual(isWebdavSyncPath("/WebDAV/"), false);
+  assert.strictEqual(isWebdavSyncPath("/WebDAV"), false);
+  assert.strictEqual(isWebdavSyncPath("/apps/Obsidian"), false);
+  assert.ok(webdavPathError("/WebDAV/")?.includes("下一级"));
+  assert.strictEqual(webdavPathError("/WebDAV/Obsidian"), null);
+  console.log("   WebDAV sync path tests passed!");
 }
 
 function testPlannerLWW() {
@@ -326,6 +341,7 @@ async function testE2EEFallback() {
 async function runAll() {
   testMD5();
   testFilter();
+  testSyncPath();
   testPlannerLWW();
   await testConfigShare();
   await testE2EEFallback();

@@ -37,6 +37,12 @@ test('unsafe paths, account root and invalid metadata rejected',()=>{
  for(const path of ['/','abc','/root/../x'])assert.throws(()=>N.basePath(path));
  assert.throws(()=>N.normalize({path:'/root/x',isdir:0,size:1,fs_id:NaN,server_mtime:1},'/root'));
 });
+test('WebDAV setup path requires a named folder below /WebDAV/',()=>{
+ const webdav=p=>p.startsWith('/WebDAV/')&&p.slice(8).length>0&&!p.slice(8).split('/').some(x=>!x||x==='.'||x==='..')?null:'必须在 /WebDAV/ 下填写文件夹名';
+ assert.equal(N.basePath('/WebDAV/Obsidian',webdav),'/WebDAV/Obsidian');
+ assert.equal(N.basePath('/WebDAV/Obsidian/Sub',webdav),'/WebDAV/Obsidian/Sub');
+ for(const path of ['/WebDAV','/WebDAV/','/WebDAV//','/apps/Obsidian','/root'])assert.throws(()=>N.basePath(path,webdav),/WebDAV/);
+});
 test('listall pagination uses server cursor not offset and honors has_more',async()=>{
  const api=new N.Api({},async()=>{}),calls=[];api.request=async(e,q)=>{calls.push(q.start);return {errno:0,list:[{path:'/apps/test/'+q.start,fs_id:q.start+1,size:1,isdir:0,server_mtime:1}],has_more:q.start===0?1:0,cursor:73};};
  assert.equal((await api.listAll('/apps/test')).size,2);assert.deepEqual(calls,[0,73]);
@@ -101,13 +107,20 @@ test('bad slice MD5 prevents commit and preserves resume journal',async()=>{
  const journals={},api=new C.Api({refreshTokenIfNeeded:async()=> 'fake'},async()=>{});
  await assert.rejects(()=>api.upload('/root/a',bytes('abc'),{},journals,async()=>{}));assert(!committed);assert.equal(journals['/root/a'].uploadid,'keep');
 });
-function fixture(){
+function fixture(Native=N){
  const files=new Map(),dirs=new Set(['','folder','.obsidian','.obsidian/plugins','.obsidian/plugins/baidu-netdisk-sync']);let tick=1;
  const adapter={exists:async p=>files.has(p)||dirs.has(p),read:async p=>text(files.get(p).b),write:async(p,s)=>{files.set(p,{b:bytes(s),t:++tick});},readBinary:async p=>files.get(p).b.slice(0),writeBinary:async(p,b)=>{files.set(p,{b:b.slice(0),t:++tick});},stat:async p=>files.has(p)?{type:'file',size:files.get(p).b.byteLength,mtime:files.get(p).t}:dirs.has(p)?{type:'folder'}:null,mkdir:async p=>{dirs.add(p)},list:async p=>({files:[...files.keys()].filter(x=>x.slice(0,Math.max(0,x.lastIndexOf('/')))===p),folders:[...dirs].filter(x=>x&&x!==p&&x.slice(0,Math.max(0,x.lastIndexOf('/')))===p)}),trashLocal:async p=>{files.delete(p);return true;}};
  const e={app:{vault:{adapter,configDir:'.obsidian',getAbstractFileByPath:p=>files.has(p)?{path:p}:null},fileManager:{renameFile:async(f,p)=>{files.set(p,files.get(f.path));files.delete(f.path);},trashFile:async f=>{files.delete(f.path)}}},manifest:{manifestFilePath:'.obsidian/plugins/baidu-netdisk-sync/sync_manifest.json'},client:{oauth:{}},filter:{shouldIgnore:p=>p.includes('baidu-netdisk-sync'),updateSettings(){}},isSyncing(){return !['idle','error'].includes(this.state)},state:'idle',setState(s){this.state=s;},addLog(){},getSettings:()=>({remoteBasePath:'/root',appKey:'key'})};
- const runner=new N.Runner(e);runner.state={version:2,files:{},uploads:{},adopted:true};runner.base='/root';runner.runId='test';runner.settings={};
+ const runner=new Native.Runner(e);runner.state={version:2,files:{},uploads:{},adopted:true};runner.base='/root';runner.runId='test';runner.settings={};
  return{runner,e,adapter,files,dirs};
 }
+test('native runner rejects an invalid WebDAV path before scanning',async()=>{
+ const webdav=p=>p.startsWith('/WebDAV/')&&p.slice(8).length>0?null:'必须在 /WebDAV/ 下填写文件夹名';
+ const W=createNativeSync({...deps,validateSyncPath:webdav});const {runner}=fixture(W);
+ runner.api.request=async()=>({errno:0,uk:1});
+ await assert.rejects(()=>runner.load({remoteBasePath:'/WebDAV/',appKey:'key'}),/WebDAV/);
+ await assert.rejects(()=>runner.load({remoteBasePath:'/root',appKey:'key'}),/WebDAV/);
+});
 test('local content hash detects changes with same size and timestamp',async()=>{
  const {runner,files}=fixture();files.set('a.md',{b:bytes('aaa'),t:1});const old=await runner.localFile('a.md');files.set('a.md',{b:bytes('bbb'),t:1});await assert.rejects(()=>runner.checkLocal('a.md',old));
 });

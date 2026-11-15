@@ -38,6 +38,14 @@ service. AppKey, AppSecret, OAuth tokens and the optional E2EE password are
 stored locally in the plugin's `data.json` and are never included in this
 repository.
 
+## First install
+
+On a fresh install the plugin opens a sync path setup dialog and does not start
+automatic sync. The default is `/WebDAV/`; enter a folder below it, for example
+`/WebDAV/Obsidian`. `/WebDAV` and `/WebDAV/` without a folder name are invalid
+and cannot be saved. After saving, run the first sync manually. Startup,
+interval, and save-triggered automatic sync begin on the next Obsidian launch.
+
 ## Install manually
 
 1. Download `main.js`, `manifest.json` and `styles.css` from the latest GitHub

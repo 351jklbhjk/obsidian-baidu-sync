@@ -6,6 +6,7 @@ import { SyncLogModal } from "./ui/logModal";
 import { md5 } from "./crypto/md5";
 import { decryptData, encryptData, getCrypto, isEncrypted } from "./crypto/e2ee";
 import { buildMultipartFormData } from "./baidu/multipart";
+import { webdavPathError } from "./settings/syncPath";
 // @ts-ignore - plain JavaScript module for the native Baidu API reconciler
 import { createNativeSync } from "./native-sync.js";
 
@@ -21,6 +22,7 @@ const nativeSync = createNativeSync({
   Setting,
   Platform,
   schedule: (fn: () => void, ms: number) => window.setTimeout(fn, ms),
+  validateSyncPath: webdavPathError,
 });
 
 nativeSync.install({

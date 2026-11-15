@@ -7,6 +7,8 @@ import { ManifestManager } from "./sync/manifest";
 import { SyncEngine } from "./sync/engine";
 import { StatusBarManager } from "./ui/statusBar";
 import { SyncLogModal } from "./ui/logModal";
+import { SyncPathSetupModal } from "./ui/syncPathSetupModal";
+import { isWebdavSyncPath } from "./settings/syncPath";
 
 export default class BaiduSyncPlugin extends Plugin {
   settings: BaiduSyncSettings = DEFAULT_SETTINGS;
@@ -19,6 +21,7 @@ export default class BaiduSyncPlugin extends Plugin {
   private intervalId: number | null = null;
   private saveDebounceTimer: number | null = null;
   private startupTimer: number | null = null;
+  private setupTimer: number | null = null;
   private startupGraceUntil = 0;
   private ribbonIconEl: HTMLElement | null = null;
 
@@ -50,6 +53,11 @@ export default class BaiduSyncPlugin extends Plugin {
       this.client,
       this.manifestMgr
     );
+    (this.engine as unknown as { onSetupRequired?: () => boolean }).onSetupRequired = () => {
+      if (!this.needsSyncPathSetup()) return false;
+      this.openSyncPathSetup();
+      return true;
+    };
 
     // Setup Status Bar
     const statusBarItem = this.addStatusBarItem();
@@ -96,14 +104,31 @@ export default class BaiduSyncPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "baidu-sync-setup",
+      name: "设置同步路径",
+      callback: () => this.openSyncPathSetup(),
+    });
+
     // Register Settings Tab
     this.addSettingTab(new BaiduSyncSettingTab(this.app, this));
 
     // Setup Automation Triggers
     this.setupTriggers();
+
+    if (this.needsSyncPathSetup()) {
+      this.setupTimer = window.setTimeout(() => {
+        this.setupTimer = null;
+        if (this.needsSyncPathSetup()) this.openSyncPathSetup();
+      }, 400);
+    }
   }
 
   onunload(): void {
+    if (this.setupTimer !== null) {
+      window.clearTimeout(this.setupTimer);
+      this.setupTimer = null;
+    }
     if (this.startupTimer !== null) {
       window.clearTimeout(this.startupTimer);
       this.startupTimer = null;
@@ -119,7 +144,14 @@ export default class BaiduSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<BaiduSyncSettings>);
+    const raw = (await this.loadData()) as Partial<BaiduSyncSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw || {});
+    const validPath = isWebdavSyncPath(this.settings.remoteBasePath);
+    if (raw && raw.onboardingComplete === undefined && validPath) {
+      this.settings.onboardingComplete = true;
+    } else if (!validPath) {
+      this.settings.onboardingComplete = false;
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -127,6 +159,7 @@ export default class BaiduSyncPlugin extends Plugin {
   }
 
   resetInterval(): void {
+    if (this.needsSyncPathSetup()) return;
     if (this.intervalId !== null) {
       window.clearInterval(this.intervalId);
       this.intervalId = null;
@@ -143,6 +176,10 @@ export default class BaiduSyncPlugin extends Plugin {
   }
 
   private setupTriggers(): void {
+    if (this.needsSyncPathSetup()) {
+      this.engine.addLog("info", "首次安装：请先设置 /WebDAV/ 下的同步文件夹；自动同步暂未启动");
+      return;
+    }
     // 1. Startup trigger
     if (this.settings.syncOnStartup && this.settings.accessToken) {
       this.startupGraceUntil = Date.now() + 10000;
@@ -187,5 +224,13 @@ export default class BaiduSyncPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("modify", onVaultChange));
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
+  }
+
+  private needsSyncPathSetup(): boolean {
+    return !this.settings.onboardingComplete || !isWebdavSyncPath(this.settings.remoteBasePath);
+  }
+
+  private openSyncPathSetup(): void {
+    new SyncPathSetupModal(this.app, this).open();
   }
 }

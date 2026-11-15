@@ -1,17 +1,19 @@
 /* Native Baidu API reconciliation. Bundled by build-native.py. No shared index. */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- Baidu API responses are dynamic and this module is the untyped transport boundary. */
 function createNativeSync(deps) {
-  const {requestUrl, md5, encryptData, decryptData, isEncrypted, buildMultipartFormData, crypto, Modal, Setting, Platform = {isWin:false}, schedule} = deps;
+  const {requestUrl, md5, encryptData, decryptData, isEncrypted, buildMultipartFormData, crypto, Modal, Setting, Platform = {isWin:false}, schedule, validateSyncPath = () => null} = deps;
   if (typeof schedule !== "function") throw new Error("schedule dependency required");
   const sleep = ms => new Promise(r => schedule(r, ms));
   const hasControl = s => Array.from(String(s)).some(ch => ch.charCodeAt(0) < 32);
   const fail = message => { throw new Error(message); };
   const safeError = e => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, '$1=[redacted]');
   const hash = async b => Array.from(new Uint8Array(await crypto().subtle.digest('SHA-256', b)), n => n.toString(16).padStart(2,'0')).join('');
-  const basePath = p => {
+  const basePath = (p, validate = () => null) => {
     if (typeof p !== 'string' || !p.startsWith('/') || p.includes('\\') || hasControl(p)) fail('无效云端根目录');
     const v = p.replace(/\/+$/, '');
     if (!v || v.split('/').slice(1).some(x => !x || x === '.' || x === '..')) fail('请选择独立同步目录，不能使用网盘根目录');
+    const pathError = validate(v);
+    if (pathError) fail(pathError);
     return v;
   };
   const relative = (p, base) => {
@@ -213,7 +215,7 @@ function createNativeSync(deps) {
     async load(settings) {
       const u=await this.api.request('https://pan.baidu.com/rest/2.0/xpan/nas',{method:'uinfo'});
       if(!u.uk)fail('无法确认网盘账号，停止同步');
-      this.base=basePath(settings.remoteBasePath);
+      this.base=basePath(settings.remoteBasePath, validateSyncPath);
       const scope=JSON.stringify([String(u.uk),this.base,settings.appKey,!!settings.enableE2EE]);
       let state;
       if(await this.adapter.exists(this.statePath)) {try{state=JSON.parse(await this.adapter.read(this.statePath));}catch{fail('本地同步基线损坏，请先恢复 native-state.json');}}
@@ -512,8 +514,8 @@ function createNativeSync(deps) {
     const originalFilter=SyncFilter.prototype.shouldIgnore;
     SyncFilter.prototype.shouldIgnore=function(p){return reserved(p)||originalFilter.call(this,p);};
     SyncEngine.prototype.nativeRunner=function(){return this._nativeRunner||(this._nativeRunner=new Runner(this));};
-    SyncEngine.prototype.startSync=function(silent=false,trigger=''){if(trigger==='启动自动'){const now=Date.now();if(this._lastStartupSync&&now-this._lastStartupSync<15000)return Promise.resolve({success:false,duplicate:true});this._lastStartupSync=now;}return this.nativeRunner().run({silent,confirm:!silent,trigger});};
-    SyncEngine.prototype.previewNative=function(){return this.nativeRunner().run({preview:true});};
+    SyncEngine.prototype.startSync=function(silent=false,trigger=''){if(this.onSetupRequired?.())return Promise.resolve({success:false,setupRequired:true});if(trigger==='启动自动'){const now=Date.now();if(this._lastStartupSync&&now-this._lastStartupSync<15000)return Promise.resolve({success:false,duplicate:true});this._lastStartupSync=now;}return this.nativeRunner().run({silent,confirm:!silent,trigger});};
+    SyncEngine.prototype.previewNative=function(){if(this.onSetupRequired?.())return Promise.resolve({success:false,setupRequired:true});return this.nativeRunner().run({preview:true});};
     // Prevent inherited legacy entry points from writing or reading the shared index.
     SyncEngine.prototype.writeRemoteIndex=async function(){throw new Error('当前版本不使用共享索引');};
     SyncEngine.prototype.loadRemoteIndex=async function(){throw new Error('当前版本不读取共享索引');};

@@ -4,7 +4,8 @@ export interface BaiduSyncSettings {
   accessToken: string;
   refreshToken: string;
   tokenExpiresAt: number; // Unix timestamp in ms
-  remoteBasePath: string;  // e.g. "/apps/obsidian_vault"
+  remoteBasePath: string;  // Must be /WebDAV/<folder>
+  onboardingComplete: boolean;
 
   // Sync triggers
   syncOnStartup: boolean;
@@ -35,7 +36,8 @@ export const DEFAULT_SETTINGS: BaiduSyncSettings = {
   accessToken: "",
   refreshToken: "",
   tokenExpiresAt: 0,
-  remoteBasePath: "/apps/obsidian_vault",
+  remoteBasePath: "/WebDAV/",
+  onboardingComplete: false,
 
   syncOnStartup: true,
   syncIntervalMinutes: 10,

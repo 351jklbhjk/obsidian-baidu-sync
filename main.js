@@ -38,7 +38,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var require_native_sync = __commonJS({
   "src/native-sync.js"(exports, module2) {
     function createNativeSync2(deps) {
-      const { requestUrl: requestUrl4, md5: md52, encryptData: encryptData2, decryptData: decryptData2, isEncrypted: isEncrypted2, buildMultipartFormData: buildMultipartFormData2, crypto: crypto2, Modal: Modal4, Setting: Setting5, Platform: Platform2 = { isWin: false }, schedule } = deps;
+      const { requestUrl: requestUrl4, md5: md52, encryptData: encryptData2, decryptData: decryptData2, isEncrypted: isEncrypted2, buildMultipartFormData: buildMultipartFormData2, crypto: crypto2, Modal: Modal5, Setting: Setting6, Platform: Platform2 = { isWin: false }, schedule, validateSyncPath = () => null } = deps;
       if (typeof schedule !== "function") throw new Error("schedule dependency required");
       const sleep = (ms) => new Promise((r) => schedule(r, ms));
       const hasControl = (s) => Array.from(String(s)).some((ch) => ch.charCodeAt(0) < 32);
@@ -47,10 +47,12 @@ var require_native_sync = __commonJS({
       };
       const safeError = (e) => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, "$1=[redacted]");
       const hash = async (b) => Array.from(new Uint8Array(await crypto2().subtle.digest("SHA-256", b)), (n) => n.toString(16).padStart(2, "0")).join("");
-      const basePath = (p) => {
+      const basePath = (p, validate = () => null) => {
         if (typeof p !== "string" || !p.startsWith("/") || p.includes("\\") || hasControl(p)) fail("\u65E0\u6548\u4E91\u7AEF\u6839\u76EE\u5F55");
         const v = p.replace(/\/+$/, "");
         if (!v || v.split("/").slice(1).some((x) => !x || x === "." || x === "..")) fail("\u8BF7\u9009\u62E9\u72EC\u7ACB\u540C\u6B65\u76EE\u5F55\uFF0C\u4E0D\u80FD\u4F7F\u7528\u7F51\u76D8\u6839\u76EE\u5F55");
+        const pathError = validate(v);
+        if (pathError) fail(pathError);
         return v;
       };
       const relative = (p, base) => {
@@ -343,7 +345,7 @@ var require_native_sync = __commonJS({
         async load(settings) {
           const u = await this.api.request("https://pan.baidu.com/rest/2.0/xpan/nas", { method: "uinfo" });
           if (!u.uk) fail("\u65E0\u6CD5\u786E\u8BA4\u7F51\u76D8\u8D26\u53F7\uFF0C\u505C\u6B62\u540C\u6B65");
-          this.base = basePath(settings.remoteBasePath);
+          this.base = basePath(settings.remoteBasePath, validateSyncPath);
           const scope = JSON.stringify([String(u.uk), this.base, settings.appKey, !!settings.enableE2EE]);
           let state;
           if (await this.adapter.exists(this.statePath)) {
@@ -711,7 +713,7 @@ var require_native_sync = __commonJS({
         chooseConflicts(conflicts) {
           return new Promise((resolve) => {
             let settled = false;
-            const RunnerModal = class extends Modal4 {
+            const RunnerModal = class extends Modal5 {
               onOpen() {
                 const { contentEl } = this;
                 contentEl.empty();
@@ -872,14 +874,14 @@ var require_native_sync = __commonJS({
           const target = this.base;
           return new Promise((resolve) => {
             let accepted = false;
-            class Review extends Modal4 {
+            class Review extends Modal5 {
               onOpen() {
                 this.contentEl.createEl("h2", { text: "\u5BA1\u9605\u672C\u6B21\u540C\u6B65" });
                 this.contentEl.createEl("p", { text: "\u540C\u6B65\u76EE\u5F55\uFF1A" + target });
                 this.contentEl.createEl("p", { text: "\u8BF7\u786E\u8BA4\u76EE\u5F55\u548C\u4E0B\u5217\u64CD\u4F5C\u3002\u5185\u5BB9\u4E00\u81F4\u7684\u6587\u4EF6\u53EA\u5EFA\u7ACB\u540C\u6B65\u8BB0\u5F55\uFF1B\u5220\u9664\u9879\u79FB\u5165\u56DE\u6536\u7AD9\u3002" });
                 const box = this.contentEl.createDiv({ cls: "baidu-conflict-scroll" });
                 for (const x of items) box.createEl("p", { text: `${itemLabel(x)}  ${x.oldPath ? x.oldPath + " \u2192 " : ""}${x.path}` });
-                new Setting5(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u8FD9\u4E9B\u64CD\u4F5C\u5E76\u540C\u6B65").setCta().onClick(() => {
+                new Setting6(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u8FD9\u4E9B\u64CD\u4F5C\u5E76\u540C\u6B65").setCta().onClick(() => {
                   accepted = true;
                   this.close();
                 }));
@@ -902,6 +904,7 @@ var require_native_sync = __commonJS({
           return this._nativeRunner || (this._nativeRunner = new Runner(this));
         };
         SyncEngine2.prototype.startSync = function(silent = false, trigger = "") {
+          if (this.onSetupRequired?.()) return Promise.resolve({ success: false, setupRequired: true });
           if (trigger === "\u542F\u52A8\u81EA\u52A8") {
             const now = Date.now();
             if (this._lastStartupSync && now - this._lastStartupSync < 15e3) return Promise.resolve({ success: false, duplicate: true });
@@ -910,6 +913,7 @@ var require_native_sync = __commonJS({
           return this.nativeRunner().run({ silent, confirm: !silent, trigger });
         };
         SyncEngine2.prototype.previewNative = function() {
+          if (this.onSetupRequired?.()) return Promise.resolve({ success: false, setupRequired: true });
           return this.nativeRunner().run({ preview: true });
         };
         SyncEngine2.prototype.writeRemoteIndex = async function() {
@@ -963,10 +967,10 @@ __export(entry_exports, {
   default: () => entry_default
 });
 module.exports = __toCommonJS(entry_exports);
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 
 // src/main.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/settings/settings.ts
 var DEFAULT_SETTINGS = {
@@ -975,7 +979,8 @@ var DEFAULT_SETTINGS = {
   accessToken: "",
   refreshToken: "",
   tokenExpiresAt: 0,
-  remoteBasePath: "/apps/obsidian_vault",
+  remoteBasePath: "/WebDAV/",
+  onboardingComplete: false,
   syncOnStartup: true,
   syncIntervalMinutes: 10,
   syncOnSave: false,
@@ -998,7 +1003,7 @@ var DEFAULT_SETTINGS = {
 };
 
 // src/settings/settingsTab.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/ui/configShareModal.ts
 var import_obsidian = require("obsidian");
@@ -1199,6 +1204,36 @@ async function importEncryptedConfig(pairingCode, pin) {
   return parsed;
 }
 
+// src/settings/syncPath.ts
+var WEBDAV_PREFIX = "/WebDAV/";
+function normalizeWebdavPath(input) {
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) return WEBDAV_PREFIX;
+  const normalized = trimmed.replace(/\/+$/, "");
+  if (normalized === "/WebDAV") return WEBDAV_PREFIX;
+  return normalized || WEBDAV_PREFIX;
+}
+function webdavPathError(input) {
+  const path = normalizeWebdavPath(input);
+  if (!path.startsWith(WEBDAV_PREFIX)) {
+    return "\u540C\u6B65\u76EE\u5F55\u5FC5\u987B\u4F4D\u4E8E /WebDAV/ \u4E0B\uFF0C\u4F8B\u5982 /WebDAV/Obsidian\u3002";
+  }
+  const rest = path.slice(WEBDAV_PREFIX.length);
+  if (!rest) {
+    return "\u8BF7\u586B\u5199 /WebDAV/ \u4E0B\u4E00\u7EA7\u7684\u6587\u4EF6\u5939\u540D\uFF0C\u4F8B\u5982 /WebDAV/Obsidian\u3002";
+  }
+  if (rest.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    return "\u8DEF\u5F84\u4E2D\u4E0D\u80FD\u5305\u542B\u7A7A\u76EE\u5F55\u540D\u3001. \u6216 ..\u3002";
+  }
+  if (path.includes("\\") || Array.from(path).some((ch) => ch.charCodeAt(0) < 32)) {
+    return "\u8DEF\u5F84\u5305\u542B\u4E0D\u652F\u6301\u7684\u5B57\u7B26\u3002";
+  }
+  return null;
+}
+function isWebdavSyncPath(input) {
+  return webdavPathError(input) === null;
+}
+
 // src/ui/configShareModal.ts
 var ExportConfigModal = class extends import_obsidian.Modal {
   constructor(app, plugin) {
@@ -1334,7 +1369,11 @@ var ImportConfigModal = class extends import_obsidian.Modal {
           if (config.accessToken) this.plugin.settings.accessToken = config.accessToken;
           if (config.refreshToken) this.plugin.settings.refreshToken = config.refreshToken;
           if (typeof config.tokenExpiresAt === "number") this.plugin.settings.tokenExpiresAt = config.tokenExpiresAt;
-          if (config.remoteBasePath) this.plugin.settings.remoteBasePath = config.remoteBasePath;
+          if (config.remoteBasePath) {
+            const path = normalizeWebdavPath(config.remoteBasePath);
+            this.plugin.settings.remoteBasePath = path;
+            this.plugin.settings.onboardingComplete = isWebdavSyncPath(path);
+          }
           if (config.syncObsidianConfig !== void 0) this.plugin.settings.syncObsidianConfig = config.syncObsidianConfig;
           if (config.syncPlugins !== void 0) this.plugin.settings.syncPlugins = config.syncPlugins;
           if (config.syncThemes !== void 0) this.plugin.settings.syncThemes = config.syncThemes;
@@ -1365,8 +1404,60 @@ var ImportConfigModal = class extends import_obsidian.Modal {
   }
 };
 
+// src/ui/syncPathSetupModal.ts
+var import_obsidian2 = require("obsidian");
+var SyncPathSetupModal = class extends import_obsidian2.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "\u8BBE\u7F6E\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8DEF\u5F84" });
+    contentEl.createEl("p", {
+      text: "\u9996\u6B21\u4F7F\u7528\u9700\u8981\u5148\u9009\u62E9\u540C\u6B65\u6587\u4EF6\u5939\u3002\u9ED8\u8BA4\u4F4D\u7F6E\u662F /WebDAV/\uFF0C\u5FC5\u987B\u5728 WebDAV \u4E0B\u518D\u586B\u5199\u4E00\u4E2A\u6587\u4EF6\u5939\u540D\uFF0C\u4F8B\u5982 /WebDAV/Obsidian\u3002\u53EA\u586B\u5199 /WebDAV \u6216 /WebDAV/ \u4E0D\u5141\u8BB8\u540C\u6B65\u3002"
+    });
+    contentEl.createEl("p", {
+      text: "\u4E0D\u540C\u8DEF\u5F84\u5C31\u662F\u4E0D\u540C\u7684\u540C\u6B65\u76EE\u6807\u3002\u9996\u6B21\u540C\u6B65\u4F1A\u5148\u6838\u5BF9\u4E24\u7AEF\u5185\u5BB9\uFF0C\u5185\u5BB9\u76F8\u540C\u7684\u6587\u4EF6\u4E0D\u4F1A\u91CD\u590D\u4E0A\u4F20\uFF1B\u4FDD\u5B58\u540E\u4E0D\u4F1A\u81EA\u52A8\u5F00\u59CB\u540C\u6B65\uFF0C\u8BF7\u624B\u52A8\u6267\u884C\u9996\u6B21\u540C\u6B65\u3002"
+    });
+    const current = isWebdavSyncPath(this.plugin.settings.remoteBasePath) ? this.plugin.settings.remoteBasePath : "/WebDAV/";
+    new import_obsidian2.Setting(contentEl).setName("\u540C\u6B65\u6587\u4EF6\u5939").setDesc("\u5FC5\u987B\u4F4D\u4E8E /WebDAV/ \u4E0B\uFF0C\u5E76\u586B\u5199\u4E0B\u4E00\u7EA7\u6587\u4EF6\u5939\u540D").addText((text) => {
+      this.inputEl = text.inputEl;
+      text.setPlaceholder("/WebDAV/Obsidian").setValue(current).onChange(() => this.updateState());
+    });
+    this.errorEl = contentEl.createDiv({ cls: "baidu-sync-path-error" });
+    new import_obsidian2.Setting(contentEl).addButton((btn) => {
+      this.saveButton = btn;
+      btn.setButtonText("\u4FDD\u5B58\u8DEF\u5F84").setCta().onClick(async () => {
+        const error = webdavPathError(this.inputEl.value);
+        if (error) {
+          this.errorEl.setText(error);
+          return;
+        }
+        const path = normalizeWebdavPath(this.inputEl.value);
+        this.plugin.settings.remoteBasePath = path;
+        this.plugin.settings.onboardingComplete = true;
+        await this.plugin.saveSettings();
+        this.plugin.engine.filter.updateSettings(this.plugin.settings);
+        new import_obsidian2.Notice(`\u540C\u6B65\u8DEF\u5F84\u5DF2\u4FDD\u5B58\uFF1A${path}\u3002\u8BF7\u624B\u52A8\u5F00\u59CB\u9996\u6B21\u540C\u6B65\uFF1B\u81EA\u52A8\u540C\u6B65\u5C06\u5728\u4E0B\u6B21\u542F\u52A8 Obsidian \u540E\u751F\u6548\u3002`);
+        this.close();
+      });
+    }).addButton((btn) => btn.setButtonText("\u53D6\u6D88").onClick(() => this.close()));
+    this.updateState();
+  }
+  updateState() {
+    const error = webdavPathError(this.inputEl?.value ?? "");
+    if (this.errorEl) this.errorEl.setText(error ?? "");
+    this.saveButton?.setDisabled(error !== null);
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
 // src/settings/settingsTab.ts
-var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
+var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1384,8 +1475,8 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
   renderSettings() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian2.Setting(containerEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("1. \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u6388\u6743 (OAuth 2.0)").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("1. \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u6388\u6743 (OAuth 2.0)").setHeading();
     const authDesc = containerEl.createDiv({ cls: "setting-item-description" });
     const p1 = authDesc.createDiv();
     p1.appendText("1. \u8BBF\u95EE ");
@@ -1400,13 +1491,13 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     p2.appendText(" \u5E76\u586B\u5165\u4E0B\u65B9\u3002");
     const p3 = authDesc.createDiv();
     p3.appendText("3. \u70B9\u51FB\u201C\u83B7\u53D6\u7F51\u9875\u6388\u6743\u7801\u201D\uFF0C\u5728\u5F39\u51FA\u7684\u9875\u9762\u767B\u5F55\u5E76\u6388\u6743\uFF0C\u5C06\u7F51\u9875\u8FD4\u56DE\u7684\u6388\u6743\u7801\u7C98\u8D34\u81F3\u4E0B\u65B9\u6362\u53D6 Token\u3002");
-    new import_obsidian2.Setting(containerEl).setName("AppKey (Client ID)").setDesc("\u5F00\u653E\u5E73\u53F0\u5E94\u7528\u51ED\u8BC1 AppKey").addText(
+    new import_obsidian3.Setting(containerEl).setName("AppKey (Client ID)").setDesc("\u5F00\u653E\u5E73\u53F0\u5E94\u7528\u51ED\u8BC1 AppKey").addText(
       (text) => text.setPlaceholder("\u8BF7\u8F93\u5165 AppKey").setValue(this.plugin.settings.appKey).onChange(async (value) => {
         this.plugin.settings.appKey = value.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("AppSecret (Client Secret)").setDesc("\u5F00\u653E\u5E73\u53F0\u5E94\u7528\u5BC6\u94A5 AppSecret").addText((text) => {
+    new import_obsidian3.Setting(containerEl).setName("AppSecret (Client Secret)").setDesc("\u5F00\u653E\u5E73\u53F0\u5E94\u7528\u5BC6\u94A5 AppSecret").addText((text) => {
       text.inputEl.type = "password";
       text.setPlaceholder("\u8BF7\u8F93\u5165 AppSecret").setValue(this.plugin.settings.appSecret).onChange(async (value) => {
         this.plugin.settings.appSecret = value.trim();
@@ -1414,53 +1505,53 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       });
     });
     let authCodeInput = "";
-    new import_obsidian2.Setting(containerEl).setName("\u83B7\u53D6\u6388\u6743\u5E76\u6362\u53D6 Token").setDesc(
+    new import_obsidian3.Setting(containerEl).setName("\u83B7\u53D6\u6388\u6743\u5E76\u6362\u53D6 Token").setDesc(
       this.plugin.settings.accessToken ? "\u2705 \u5DF2\u6388\u6743\u7F51\u76D8\u8D26\u53F7" : "\u26A0\uFE0F \u5C1A\u672A\u7ED1\u5B9A\u767E\u5EA6\u7F51\u76D8"
     ).addButton(
       (btn) => btn.setButtonText("\u7B2C\u4E00\u6B65\uFF1A\u6253\u5F00\u6388\u6743\u7F51\u9875").onClick(() => {
         try {
           const url = this.plugin.oauth.getOAuthUrl();
           window.open(url);
-          new import_obsidian2.Notice("\u8BF7\u5728\u6D4F\u89C8\u5668\u5B8C\u6210\u6388\u6743\uFF0C\u5E76\u590D\u5236\u7F51\u9875\u4E2D\u7684\u6388\u6743\u7801\uFF01");
+          new import_obsidian3.Notice("\u8BF7\u5728\u6D4F\u89C8\u5668\u5B8C\u6210\u6388\u6743\uFF0C\u5E76\u590D\u5236\u7F51\u9875\u4E2D\u7684\u6388\u6743\u7801\uFF01");
         } catch (err) {
           const msg = err instanceof Error ? err.message : "\u8BF7\u5148\u586B\u5199 AppKey";
-          new import_obsidian2.Notice(msg);
+          new import_obsidian3.Notice(msg);
         }
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("\u586B\u5165\u6388\u6743\u7801 (Authorization Code)").setDesc("\u5C06\u7F51\u9875\u4E2D\u83B7\u53D6\u7684 Code \u7C98\u8D34\u5728\u6B64\u5904\u6362\u53D6\u6301\u4E45\u51ED\u636E").addText(
+    new import_obsidian3.Setting(containerEl).setName("\u586B\u5165\u6388\u6743\u7801 (Authorization Code)").setDesc("\u5C06\u7F51\u9875\u4E2D\u83B7\u53D6\u7684 Code \u7C98\u8D34\u5728\u6B64\u5904\u6362\u53D6\u6301\u4E45\u51ED\u636E").addText(
       (text) => text.setPlaceholder("\u7C98\u8D34\u6388\u6743\u7801...").onChange((value) => {
         authCodeInput = value.trim();
       })
     ).addButton(
       (btn) => btn.setButtonText("\u7B2C\u4E8C\u6B65\uFF1A\u786E\u8BA4\u6362\u53D6 Token").setCta().onClick(async () => {
         if (!authCodeInput) {
-          new import_obsidian2.Notice("\u8BF7\u5148\u8F93\u5165\u7F51\u9875\u8FD4\u56DE\u7684\u6388\u6743\u7801");
+          new import_obsidian3.Notice("\u8BF7\u5148\u8F93\u5165\u7F51\u9875\u8FD4\u56DE\u7684\u6388\u6743\u7801");
           return;
         }
         try {
           btn.setDisabled(true);
           btn.setButtonText("\u6B63\u5728\u6362\u53D6...");
           await this.plugin.oauth.exchangeCodeForToken(authCodeInput);
-          new import_obsidian2.Notice("\u{1F389} \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u7ED1\u5B9A\u6210\u529F\uFF01");
+          new import_obsidian3.Notice("\u{1F389} \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u7ED1\u5B9A\u6210\u529F\uFF01");
           this.renderSettings();
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          new import_obsidian2.Notice(`\u7ED1\u5B9A\u5931\u8D25: ${msg}`);
+          new import_obsidian3.Notice(`\u7ED1\u5B9A\u5931\u8D25: ${msg}`);
         } finally {
           btn.setDisabled(false);
           btn.setButtonText("\u7B2C\u4E8C\u6B65\uFF1A\u786E\u8BA4\u6362\u53D6 Token");
         }
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("2. \u{1F4F1} \u591A\u8BBE\u5907\u5FEB\u901F\u914D\u5BF9\u4E0E\u914D\u7F6E\u8FC1\u79FB").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("2. \u{1F4F1} \u591A\u8BBE\u5907\u5FEB\u901F\u914D\u5BF9\u4E0E\u914D\u7F6E\u8FC1\u79FB").setHeading();
     const pairDesc = containerEl.createDiv({
       cls: "setting-item-description baidu-sync-setting-desc"
     });
     pairDesc.setText(
       "\u514D\u53BB\u624B\u673A/\u5E73\u677F\u7AEF\u91CD\u590D\u7533\u8BF7\u5F00\u653E\u5E73\u53F0\u5E94\u7528\u4E0E\u7E41\u7410\u6388\u6743\u6D41\u7A0B\u3002\u5728\u5DF2\u914D\u7F6E\u7684\u4E3B\u8BBE\u5907\u4E0A\u4E00\u952E\u5BFC\u51FA\u52A0\u5BC6\u914D\u5BF9\u7801\uFF0C\u5728\u7B2C\u4E8C\u53F0\u8BBE\u5907\u76F4\u63A5\u5BFC\u5165\u5373\u53EF\u79D2\u7EA7\u5B8C\u6210\u5168\u7AEF\u540C\u6B65\u8FDE\u63A5\u3002"
     );
-    new import_obsidian2.Setting(containerEl).setName("\u591A\u8BBE\u5907\u914D\u5BF9\u7BA1\u7406").setDesc("\u901A\u8FC7 AES-256-GCM \u5BC6\u7801\u4FDD\u62A4\u7684\u914D\u5BF9\u7801\u5728\u624B\u673A\u3001\u5E73\u677F\u4E0E\u7535\u8111\u95F4\u5B89\u5168\u8FC1\u79FB\u6388\u6743\u4E0E\u8BBE\u7F6E").addButton(
+    new import_obsidian3.Setting(containerEl).setName("\u591A\u8BBE\u5907\u914D\u5BF9\u7BA1\u7406").setDesc("\u901A\u8FC7 AES-256-GCM \u5BC6\u7801\u4FDD\u62A4\u7684\u914D\u5BF9\u7801\u5728\u624B\u673A\u3001\u5E73\u677F\u4E0E\u7535\u8111\u95F4\u5B89\u5168\u8FC1\u79FB\u6388\u6743\u4E0E\u8BBE\u7F6E").addButton(
       (btn) => btn.setButtonText("\u{1F4E4} \u5BFC\u51FA\u914D\u7F6E\u81F3\u5176\u4ED6\u8BBE\u5907").setCta().onClick(() => {
         new ExportConfigModal(this.app, this.plugin).open();
       })
@@ -1471,34 +1562,40 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         }).open();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("3. \u5B58\u50A8\u4E0E\u76EE\u5F55\u89C4\u5212").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u7F51\u76D8\u7AEF\u6839\u76EE\u5F55").setDesc("\u7F51\u76D8\u4E2D\u5B58\u653E\u6B64\u77E5\u8BC6\u5E93\u7684\u7EDD\u5BF9\u8DEF\u5F84 (\u9ED8\u8BA4: /apps/obsidian_vault)").addText(
-      (text) => text.setPlaceholder("/apps/obsidian_vault").setValue(this.plugin.settings.remoteBasePath).onChange(async (val) => {
-        this.plugin.settings.remoteBasePath = val.trim();
+    new import_obsidian3.Setting(containerEl).setName("3. \u5B58\u50A8\u4E0E\u76EE\u5F55\u89C4\u5212").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u7F51\u76D8\u7AEF\u6839\u76EE\u5F55").setDesc("\u5FC5\u987B\u4F4D\u4E8E /WebDAV/ \u4E0B\uFF0C\u5E76\u586B\u5199\u4E0B\u4E00\u7EA7\u6587\u4EF6\u5939\u540D\uFF0C\u4F8B\u5982 /WebDAV/Obsidian\uFF1B\u53EA\u586B /WebDAV/ \u4E0D\u5141\u8BB8\u540C\u6B65").addText(
+      (text) => text.setPlaceholder("/WebDAV/Obsidian").setValue(this.plugin.settings.remoteBasePath).onChange(async (val) => {
+        const path = normalizeWebdavPath(val);
+        this.plugin.settings.remoteBasePath = path;
+        this.plugin.settings.onboardingComplete = isWebdavSyncPath(path);
         await this.plugin.saveSettings();
       })
+    ).addButton(
+      (btn) => btn.setButtonText("\u8DEF\u5F84\u8BBE\u7F6E\u5411\u5BFC").onClick(() => {
+        new SyncPathSetupModal(this.app, this.plugin).open();
+      })
     );
-    new import_obsidian2.Setting(containerEl).setName("4. \u914D\u7F6E\u540C\u6B65\u4E0E\u6587\u4EF6\u8FC7\u6EE4").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("4. \u914D\u7F6E\u540C\u6B65\u4E0E\u6587\u4EF6\u8FC7\u6EE4").setHeading();
     const configDirName = this.app.vault.configDir;
-    new import_obsidian2.Setting(containerEl).setName(`\u540C\u6B65 ${configDirName} \u914D\u7F6E\u76EE\u5F55`).setDesc(`\u5F00\u542F\u540E\u5C06\u540C\u6B65 ${configDirName} \u4E2D\u7684\u63D2\u4EF6\u3001\u5916\u89C2\u4E0E\u5168\u5C40\u914D\u7F6E\uFF08\u81EA\u52A8\u6392\u9664 workspace.json \u5E03\u5C40\u7F13\u5B58\uFF09`).addToggle(
+    new import_obsidian3.Setting(containerEl).setName(`\u540C\u6B65 ${configDirName} \u914D\u7F6E\u76EE\u5F55`).setDesc(`\u5F00\u542F\u540E\u5C06\u540C\u6B65 ${configDirName} \u4E2D\u7684\u63D2\u4EF6\u3001\u5916\u89C2\u4E0E\u5168\u5C40\u914D\u7F6E\uFF08\u81EA\u52A8\u6392\u9664 workspace.json \u5E03\u5C40\u7F13\u5B58\uFF09`).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncObsidianConfig).onChange(async (val) => {
         this.plugin.settings.syncObsidianConfig = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName(`\u540C\u6B65\u7B2C\u4E09\u65B9\u63D2\u4EF6 (${configDirName}/plugins)`).setDesc("\u5F00\u542F\u540E\u5C06\u5728\u591A\u7AEF\u540C\u6B65\u5DF2\u5B89\u88C5\u7684\u793E\u533A\u63D2\u4EF6").addToggle(
+    new import_obsidian3.Setting(containerEl).setName(`\u540C\u6B65\u7B2C\u4E09\u65B9\u63D2\u4EF6 (${configDirName}/plugins)`).setDesc("\u5F00\u542F\u540E\u5C06\u5728\u591A\u7AEF\u540C\u6B65\u5DF2\u5B89\u88C5\u7684\u793E\u533A\u63D2\u4EF6").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncPlugins).onChange(async (val) => {
         this.plugin.settings.syncPlugins = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName(`\u540C\u6B65\u5916\u89C2\u4E0E\u4E3B\u9898 (${configDirName}/themes)`).setDesc("\u5F00\u542F\u540E\u540C\u6B65\u5DF2\u4E0B\u8F7D\u7684\u4E3B\u9898\u4E0E CSS \u7247\u6BB5").addToggle(
+    new import_obsidian3.Setting(containerEl).setName(`\u540C\u6B65\u5916\u89C2\u4E0E\u4E3B\u9898 (${configDirName}/themes)`).setDesc("\u5F00\u542F\u540E\u540C\u6B65\u5DF2\u4E0B\u8F7D\u7684\u4E3B\u9898\u4E0E CSS \u7247\u6BB5").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncThemes).onChange(async (val) => {
         this.plugin.settings.syncThemes = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("\u6392\u9664\u89C4\u5219 (Ignored Patterns)").setDesc("\u6BCF\u884C\u4E00\u6761 Glob \u5339\u914D\u89C4\u5219\uFF0C\u5339\u914D\u7684\u6587\u4EF6\u5C06\u5B8C\u5168\u4E0D\u53C2\u4E0E\u540C\u6B65").addTextArea((area) => {
+    new import_obsidian3.Setting(containerEl).setName("\u6392\u9664\u89C4\u5219 (Ignored Patterns)").setDesc("\u6BCF\u884C\u4E00\u6761 Glob \u5339\u914D\u89C4\u5219\uFF0C\u5339\u914D\u7684\u6587\u4EF6\u5C06\u5B8C\u5168\u4E0D\u53C2\u4E0E\u540C\u6B65").addTextArea((area) => {
       area.inputEl.rows = 6;
       area.inputEl.addClass("baidu-sync-textarea");
       area.setValue(this.plugin.settings.ignoredPatterns).onChange(async (val) => {
@@ -1506,14 +1603,14 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian2.Setting(containerEl).setName("5. \u540C\u6B65\u89E6\u53D1\u673A\u5236").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u542F\u52A8\u65F6\u81EA\u52A8\u540C\u6B65").setDesc("\u6253\u5F00 Obsidian \u65F6\u81EA\u52A8\u5728\u540E\u53F0\u6267\u884C\u4E00\u6B21\u9759\u9ED8\u540C\u6B65").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("5. \u540C\u6B65\u89E6\u53D1\u673A\u5236").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u542F\u52A8\u65F6\u81EA\u52A8\u540C\u6B65").setDesc("\u6253\u5F00 Obsidian \u65F6\u81EA\u52A8\u5728\u540E\u53F0\u6267\u884C\u4E00\u6B21\u9759\u9ED8\u540C\u6B65").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncOnStartup).onChange(async (val) => {
         this.plugin.settings.syncOnStartup = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("\u5B9A\u65F6\u81EA\u52A8\u540C\u6B65\u5468\u671F (\u5206\u949F)").setDesc("\u8BBE\u5B9A\u540E\u53F0\u5B9A\u65F6\u9759\u9ED8\u540C\u6B65\u7684\u65F6\u95F4\u95F4\u9694\uFF0C\u8BBE\u4E3A 0 \u5219\u7981\u7528\u5B9A\u65F6\u540C\u6B65").addText(
+    new import_obsidian3.Setting(containerEl).setName("\u5B9A\u65F6\u81EA\u52A8\u540C\u6B65\u5468\u671F (\u5206\u949F)").setDesc("\u8BBE\u5B9A\u540E\u53F0\u5B9A\u65F6\u9759\u9ED8\u540C\u6B65\u7684\u65F6\u95F4\u95F4\u9694\uFF0C\u8BBE\u4E3A 0 \u5219\u7981\u7528\u5B9A\u65F6\u540C\u6B65").addText(
       (text) => text.setPlaceholder("10").setValue(String(this.plugin.settings.syncIntervalMinutes)).onChange(async (val) => {
         const num = parseInt(val, 10);
         this.plugin.settings.syncIntervalMinutes = isNaN(num) ? 0 : Math.max(0, num);
@@ -1521,34 +1618,34 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         this.plugin.resetInterval();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("\u4FDD\u5B58/\u4FEE\u6539\u540E\u9632\u6296\u81EA\u52A8\u540C\u6B65").setDesc("\u6587\u4EF6\u4FDD\u5B58\u6216\u7F16\u8F91\u505C\u6B62\u4E00\u6BB5\u65F6\u95F4\u540E\u81EA\u52A8\u89E6\u53D1\u540C\u6B65").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("\u4FDD\u5B58/\u4FEE\u6539\u540E\u9632\u6296\u81EA\u52A8\u540C\u6B65").setDesc("\u6587\u4EF6\u4FDD\u5B58\u6216\u7F16\u8F91\u505C\u6B62\u4E00\u6BB5\u65F6\u95F4\u540E\u81EA\u52A8\u89E6\u53D1\u540C\u6B65").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncOnSave).onChange(async (val) => {
         this.plugin.settings.syncOnSave = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("6. \u4F20\u8F93\u8C03\u5EA6\u4E0E\u7F51\u7EDC\u5E76\u53D1").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u5E76\u53D1\u4F20\u8F93\u8BF7\u6C42\u6570 (1~5)").setDesc("\u540C\u65F6\u4E0A\u4F20/\u4E0B\u8F7D\u7684\u4EFB\u52A1\u6570\uFF0C\u63A8\u8350\u8BBE\u4E3A 2~3 \u907F\u514D\u89E6\u53D1\u767E\u5EA6\u7F51\u76D8 QPS \u9891\u7387\u9650\u5236").addSlider(
+    new import_obsidian3.Setting(containerEl).setName("6. \u4F20\u8F93\u8C03\u5EA6\u4E0E\u7F51\u7EDC\u5E76\u53D1").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u5E76\u53D1\u4F20\u8F93\u8BF7\u6C42\u6570 (1~5)").setDesc("\u540C\u65F6\u4E0A\u4F20/\u4E0B\u8F7D\u7684\u4EFB\u52A1\u6570\uFF0C\u63A8\u8350\u8BBE\u4E3A 2~3 \u907F\u514D\u89E6\u53D1\u767E\u5EA6\u7F51\u76D8 QPS \u9891\u7387\u9650\u5236").addSlider(
       (slider) => slider.setLimits(1, 5, 1).setValue(this.plugin.settings.concurrency).onChange(async (val) => {
         this.plugin.settings.concurrency = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("7. \u7AEF\u5230\u7AEF\u9690\u79C1\u52A0\u5BC6 (E2EE)").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u5F00\u542F AES-256-GCM \u7AEF\u5230\u7AEF\u52A0\u5BC6").setDesc("\u5F00\u542F\u540E\u6240\u6709\u6587\u4EF6\u5728\u4E0A\u4F20\u5230\u767E\u5EA6\u7F51\u76D8\u524D\u5747\u4F1A\u8FDB\u884C\u9AD8\u5F3A\u5EA6\u52A0\u5BC6\uFF0C\u7F51\u76D8\u7AEF\u65E0\u6CD5\u67E5\u770B\u660E\u6587\u3002\u6CE8\u610F\uFF1A\u591A\u7AEF\u540C\u6B65\u5FC5\u987B\u914D\u7F6E\u5B8C\u5168\u76F8\u540C\u7684\u5BC6\u7801\uFF01").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("7. \u7AEF\u5230\u7AEF\u9690\u79C1\u52A0\u5BC6 (E2EE)").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u5F00\u542F AES-256-GCM \u7AEF\u5230\u7AEF\u52A0\u5BC6").setDesc("\u5F00\u542F\u540E\u6240\u6709\u6587\u4EF6\u5728\u4E0A\u4F20\u5230\u767E\u5EA6\u7F51\u76D8\u524D\u5747\u4F1A\u8FDB\u884C\u9AD8\u5F3A\u5EA6\u52A0\u5BC6\uFF0C\u7F51\u76D8\u7AEF\u65E0\u6CD5\u67E5\u770B\u660E\u6587\u3002\u6CE8\u610F\uFF1A\u591A\u7AEF\u540C\u6B65\u5FC5\u987B\u914D\u7F6E\u5B8C\u5168\u76F8\u540C\u7684\u5BC6\u7801\uFF01").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableE2EE).onChange(async (val) => {
         this.plugin.settings.enableE2EE = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("E2EE \u89E3\u5BC6\u4E0E\u52A0\u5BC6\u5BC6\u7801").setDesc("\u7528\u4E8E\u751F\u6210\u6D3E\u751F\u79D8\u94A5\u7684\u4E3B\u5BC6\u7801").addText((text) => {
+    new import_obsidian3.Setting(containerEl).setName("E2EE \u89E3\u5BC6\u4E0E\u52A0\u5BC6\u5BC6\u7801").setDesc("\u7528\u4E8E\u751F\u6210\u6D3E\u751F\u79D8\u94A5\u7684\u4E3B\u5BC6\u7801").addText((text) => {
       text.inputEl.type = "password";
       text.setPlaceholder("\u8BF7\u8F93\u5165\u52A0\u5BC6\u5BC6\u7801").setValue(this.plugin.settings.e2eePassword).onChange(async (val) => {
         this.plugin.settings.e2eePassword = val;
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian2.Setting(containerEl).setName("\u53CC\u5411\u540C\u6B65").setDesc("\u76F4\u63A5\u8BFB\u53D6\u7F51\u76D8\u6587\u4EF6\u5217\u8868\uFF0C\u9884\u89C8\u65B0\u589E\u3001\u4FEE\u6539\u3001\u79FB\u52A8\u3001\u51B2\u7A81\u548C\u5F85\u786E\u8BA4\u5220\u9664\u3002").addButton((btn) => {
+    new import_obsidian3.Setting(containerEl).setName("\u53CC\u5411\u540C\u6B65").setDesc("\u76F4\u63A5\u8BFB\u53D6\u7F51\u76D8\u6587\u4EF6\u5217\u8868\uFF0C\u9884\u89C8\u65B0\u589E\u3001\u4FEE\u6539\u3001\u79FB\u52A8\u3001\u51B2\u7A81\u548C\u5F85\u786E\u8BA4\u5220\u9664\u3002").addButton((btn) => {
       btn.setButtonText("\u9884\u89C8\u53D8\u5316").onClick(async () => {
         btn.setDisabled(true);
         try {
@@ -1562,7 +1659,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
 };
 
 // src/baidu/oauth.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 var BaiduOAuthManager = class {
   constructor(getSettings, saveSettings) {
     this.getSettings = getSettings;
@@ -1590,7 +1687,7 @@ var BaiduOAuthManager = class {
       client_secret: settings.appSecret.trim(),
       redirect_uri: "oob"
     });
-    const resp = await (0, import_obsidian3.requestUrl)({
+    const resp = await (0, import_obsidian4.requestUrl)({
       url,
       method: "POST",
       headers: {
@@ -1631,7 +1728,7 @@ var BaiduOAuthManager = class {
         client_id: settings.appKey,
         client_secret: settings.appSecret
       });
-      const resp = await (0, import_obsidian3.requestUrl)({
+      const resp = await (0, import_obsidian4.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1661,7 +1758,7 @@ var BaiduOAuthManager = class {
   async getUserInfo() {
     const token = await this.refreshTokenIfNeeded();
     const url = `https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&access_token=${token}`;
-    const resp = await (0, import_obsidian3.requestUrl)({
+    const resp = await (0, import_obsidian4.requestUrl)({
       url,
       method: "GET"
     });
@@ -1673,7 +1770,7 @@ var BaiduOAuthManager = class {
 };
 
 // src/baidu/client.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/baidu/multipart.ts
 function buildMultipartFormData(fileBuffer, fieldName = "file", fileName = "blob") {
@@ -1714,7 +1811,7 @@ var BaiduClient = class {
     let delay = initialDelayMs;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const resp = await (0, import_obsidian4.requestUrl)(param);
+        const resp = await (0, import_obsidian5.requestUrl)(param);
         if (resp.status === 200) {
           try {
             const data = resp.json;
@@ -2021,7 +2118,7 @@ var ManifestManager = class {
 };
 
 // src/sync/engine.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/crypto/md5.ts
 function safeAdd(x, y) {
@@ -2701,7 +2798,7 @@ var SyncEngine = class {
       case "DELETE_LOCAL": {
         if (await adapter.exists(item.path)) {
           const file = this.app.vault.getAbstractFileByPath(item.path);
-          if (file && file instanceof import_obsidian5.TFile) {
+          if (file && file instanceof import_obsidian6.TFile) {
             await this.app.fileManager.trashFile(file);
           } else {
             await adapter.trashLocal(item.path);
@@ -2890,8 +2987,8 @@ var StatusBarManager = class {
 };
 
 // src/ui/logModal.ts
-var import_obsidian6 = require("obsidian");
-var SyncLogModal = class extends import_obsidian6.Modal {
+var import_obsidian7 = require("obsidian");
+var SyncLogModal = class extends import_obsidian7.Modal {
   constructor(app, engine) {
     super(app);
     this.engine = engine;
@@ -2902,8 +2999,8 @@ var SyncLogModal = class extends import_obsidian6.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("baidu-sync-log-modal");
-    new import_obsidian6.Setting(contentEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u65E5\u5FD7").setHeading();
-    const syncSetting = new import_obsidian6.Setting(contentEl).setName("\u7ACB\u5373\u6267\u884C\u540C\u6B65").setDesc("\u624B\u52A8\u89E6\u53D1\u5168\u91CF\u5BF9\u6BD4\u4E0E\u589E\u91CF\u53CC\u5411\u540C\u6B65").addButton((btn) => {
+    new import_obsidian7.Setting(contentEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u65E5\u5FD7").setHeading();
+    const syncSetting = new import_obsidian7.Setting(contentEl).setName("\u7ACB\u5373\u6267\u884C\u540C\u6B65").setDesc("\u624B\u52A8\u89E6\u53D1\u5168\u91CF\u5BF9\u6BD4\u4E0E\u589E\u91CF\u53CC\u5411\u540C\u6B65").addButton((btn) => {
       btn.setButtonText("\u5F00\u59CB\u540C\u6B65").setCta().onClick(async () => {
         btn.setDisabled(true);
         btn.setButtonText("\u540C\u6B65\u4E2D...");
@@ -2983,13 +3080,14 @@ var SyncLogModal = class extends import_obsidian6.Modal {
 };
 
 // src/main.ts
-var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
+var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.intervalId = null;
     this.saveDebounceTimer = null;
     this.startupTimer = null;
+    this.setupTimer = null;
     this.startupGraceUntil = 0;
     this.ribbonIconEl = null;
   }
@@ -3016,17 +3114,22 @@ var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
       this.client,
       this.manifestMgr
     );
+    this.engine.onSetupRequired = () => {
+      if (!this.needsSyncPathSetup()) return false;
+      this.openSyncPathSetup();
+      return true;
+    };
     const statusBarItem = this.addStatusBarItem();
     this.statusBar = new StatusBarManager(statusBarItem, this.engine, () => {
       new SyncLogModal(this.app, this.engine).open();
     });
     this.ribbonIconEl = this.addRibbonIcon("cloud", "\u767E\u5EA6\u7F51\u76D8\u540C\u6B65", async () => {
-      new import_obsidian7.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
+      new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
       const res = await this.engine.startSync(false);
       if (res.success) {
-        new import_obsidian7.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
+        new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
       } else {
-        new import_obsidian7.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u540C\u6B65\u65E5\u5FD7");
+        new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u540C\u6B65\u65E5\u5FD7");
       }
     });
     this.engine.onStateChange((state) => {
@@ -3042,7 +3145,7 @@ var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
       id: "baidu-sync-now",
       name: "\u7ACB\u5373\u6267\u884C\u540C\u6B65 (Sync Now)",
       callback: async () => {
-        new import_obsidian7.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
+        new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
         await this.engine.startSync(false);
       }
     });
@@ -3053,10 +3156,25 @@ var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
         new SyncLogModal(this.app, this.engine).open();
       }
     });
+    this.addCommand({
+      id: "baidu-sync-setup",
+      name: "\u8BBE\u7F6E\u540C\u6B65\u8DEF\u5F84",
+      callback: () => this.openSyncPathSetup()
+    });
     this.addSettingTab(new BaiduSyncSettingTab(this.app, this));
     this.setupTriggers();
+    if (this.needsSyncPathSetup()) {
+      this.setupTimer = window.setTimeout(() => {
+        this.setupTimer = null;
+        if (this.needsSyncPathSetup()) this.openSyncPathSetup();
+      }, 400);
+    }
   }
   onunload() {
+    if (this.setupTimer !== null) {
+      window.clearTimeout(this.setupTimer);
+      this.setupTimer = null;
+    }
     if (this.startupTimer !== null) {
       window.clearTimeout(this.startupTimer);
       this.startupTimer = null;
@@ -3071,12 +3189,20 @@ var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
     }
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const raw = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw || {});
+    const validPath = isWebdavSyncPath(this.settings.remoteBasePath);
+    if (raw && raw.onboardingComplete === void 0 && validPath) {
+      this.settings.onboardingComplete = true;
+    } else if (!validPath) {
+      this.settings.onboardingComplete = false;
+    }
   }
   async saveSettings() {
     await this.saveData(this.settings);
   }
   resetInterval() {
+    if (this.needsSyncPathSetup()) return;
     if (this.intervalId !== null) {
       window.clearInterval(this.intervalId);
       this.intervalId = null;
@@ -3091,6 +3217,10 @@ var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
     }
   }
   setupTriggers() {
+    if (this.needsSyncPathSetup()) {
+      this.engine.addLog("info", "\u9996\u6B21\u5B89\u88C5\uFF1A\u8BF7\u5148\u8BBE\u7F6E /WebDAV/ \u4E0B\u7684\u540C\u6B65\u6587\u4EF6\u5939\uFF1B\u81EA\u52A8\u540C\u6B65\u6682\u672A\u542F\u52A8");
+      return;
+    }
     if (this.settings.syncOnStartup && this.settings.accessToken) {
       this.startupGraceUntil = Date.now() + 1e4;
       if (this.saveDebounceTimer !== null) {
@@ -3121,28 +3251,35 @@ var BaiduSyncPlugin = class extends import_obsidian7.Plugin {
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
   }
+  needsSyncPathSetup() {
+    return !this.settings.onboardingComplete || !isWebdavSyncPath(this.settings.remoteBasePath);
+  }
+  openSyncPathSetup() {
+    new SyncPathSetupModal(this.app, this).open();
+  }
 };
 
 // src/entry.ts
 var import_native_sync = __toESM(require_native_sync());
 var nativeSync = (0, import_native_sync.createNativeSync)({
-  requestUrl: import_obsidian8.requestUrl,
+  requestUrl: import_obsidian9.requestUrl,
   md5,
   encryptData,
   decryptData,
   isEncrypted,
   buildMultipartFormData,
   crypto: getCrypto,
-  Modal: import_obsidian8.Modal,
-  Setting: import_obsidian8.Setting,
-  Platform: import_obsidian8.Platform,
-  schedule: (fn, ms) => window.setTimeout(fn, ms)
+  Modal: import_obsidian9.Modal,
+  Setting: import_obsidian9.Setting,
+  Platform: import_obsidian9.Platform,
+  schedule: (fn, ms) => window.setTimeout(fn, ms),
+  validateSyncPath: webdavPathError
 });
 nativeSync.install({
   SyncEngine,
   BaiduSyncPlugin,
   SyncLogModal,
   SyncFilter,
-  TFile: import_obsidian8.TFile
+  TFile: import_obsidian9.TFile
 });
 var entry_default = BaiduSyncPlugin;

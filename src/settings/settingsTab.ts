@@ -1,6 +1,8 @@
 import { App, PluginSettingTab, Setting, Notice, SettingDefinitionItem } from "obsidian";
 import type BaiduSyncPlugin from "../main";
 import { ExportConfigModal, ImportConfigModal } from "../ui/configShareModal";
+import { SyncPathSetupModal } from "../ui/syncPathSetupModal";
+import { isWebdavSyncPath, normalizeWebdavPath } from "./syncPath";
 
 export class BaiduSyncSettingTab extends PluginSettingTab {
   plugin: BaiduSyncPlugin;
@@ -167,15 +169,22 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("网盘端根目录")
-      .setDesc("网盘中存放此知识库的绝对路径 (默认: /apps/obsidian_vault)")
+      .setDesc("必须位于 /WebDAV/ 下，并填写下一级文件夹名，例如 /WebDAV/Obsidian；只填 /WebDAV/ 不允许同步")
       .addText((text) =>
         text
-          .setPlaceholder("/apps/obsidian_vault")
+          .setPlaceholder("/WebDAV/Obsidian")
           .setValue(this.plugin.settings.remoteBasePath)
           .onChange(async (val) => {
-            this.plugin.settings.remoteBasePath = val.trim();
+            const path = normalizeWebdavPath(val);
+            this.plugin.settings.remoteBasePath = path;
+            this.plugin.settings.onboardingComplete = isWebdavSyncPath(path);
             await this.plugin.saveSettings();
           })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("路径设置向导").onClick(() => {
+          new SyncPathSetupModal(this.app, this.plugin).open();
+        })
       );
 
     // Section 4: Scope and Filtering

@@ -1,6 +1,7 @@
 import { App, Modal, Setting, Notice } from "obsidian";
 import type BaiduSyncPlugin from "../main";
 import { exportEncryptedConfig, importEncryptedConfig } from "../crypto/configShare";
+import { isWebdavSyncPath, normalizeWebdavPath } from "../settings/syncPath";
 
 export class ExportConfigModal extends Modal {
   private plugin: BaiduSyncPlugin;
@@ -182,7 +183,11 @@ export class ImportConfigModal extends Modal {
               if (config.accessToken) this.plugin.settings.accessToken = config.accessToken;
               if (config.refreshToken) this.plugin.settings.refreshToken = config.refreshToken;
               if (typeof config.tokenExpiresAt === "number") this.plugin.settings.tokenExpiresAt = config.tokenExpiresAt;
-              if (config.remoteBasePath) this.plugin.settings.remoteBasePath = config.remoteBasePath;
+              if (config.remoteBasePath) {
+                const path = normalizeWebdavPath(config.remoteBasePath);
+                this.plugin.settings.remoteBasePath = path;
+                this.plugin.settings.onboardingComplete = isWebdavSyncPath(path);
+              }
               if (config.syncObsidianConfig !== undefined) this.plugin.settings.syncObsidianConfig = config.syncObsidianConfig;
               if (config.syncPlugins !== undefined) this.plugin.settings.syncPlugins = config.syncPlugins;
               if (config.syncThemes !== undefined) this.plugin.settings.syncThemes = config.syncThemes;
