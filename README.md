@@ -1,34 +1,71 @@
 # Baidu Netdisk Sync Plus for Obsidian
 
-Version 1.0.2. A modified build based on [owl234/obsidian-baidu-netdisk-sync](https://github.com/owl234/obsidian-baidu-netdisk-sync), MIT License. Original author attribution is retained in [NOTICE.md](NOTICE.md).
+Baidu Netdisk Sync Plus synchronizes an Obsidian vault with Baidu Netdisk in
+both directions. It is a modified build of
+[owl234/obsidian-baidu-netdisk-sync](https://github.com/owl234/obsidian-baidu-netdisk-sync)
+under the MIT License, with a separate plugin ID so both plugins can be
+installed side by side.
 
-The plugin ID is now **baidu-netdisk-sync-plus**, distinct from the original community plugin. The marketplace listing name is **Baidu Netdisk Sync Plus**.
+The sync engine was rewritten around per-device content baselines instead of a
+shared remote index.
 
 ## Features
 
-- Per-device baseline instead of the original shared remote index.
-- SHA-256 local content verification and Baidu cloud revision tracking.
-- Conflict table: keep local, keep cloud, keep both, or skip.
-- Startup auto sync prompts for conflicts; interval/save background sync holds them.
-- Explicit file and folder rename journal. Same-parent renames use Baidu filemanager opera=rename; cross-parent renames use opera=move.
-- Folder renames reload child metadata before deciding which changed files need upload.
-- Reviewed deletions with Obsidian trash and the Baidu recycle bin.
-- Four-stage resumable multipart uploads and post-transfer verification.
-- No automatic .baidu-native-history copy on ordinary overwrites.
+- Per-device baseline with SHA-256 local content hashes and cloud revision
+  metadata.
+- Conflict table with four choices: keep local, keep cloud, keep both, or skip.
+- Startup auto sync prompts for conflicts; interval and save-triggered sync hold
+  conflicts until the next manual run.
+- Explicit file and folder rename journal. Same-parent renames use Baidu
+  `filemanager opera=rename`; cross-directory renames use `opera=move`.
+- Folder renames update cloud paths first, refresh child metadata, and upload
+  only files whose content changed.
+- Reviewed deletions use the Obsidian vault trash and the Baidu recycle bin.
+- Four-stage resumable multipart uploads with post-transfer verification.
+- No automatic history copies on ordinary overwrites.
 
-## Install
+## Network use
 
-Copy main.js, manifest.json and styles.css into .obsidian/plugins/baidu-netdisk-sync-plus/, restart Obsidian and enable **Baidu Netdisk Sync Plus**. Configure your own Baidu Open Platform AppKey/AppSecret.
+The plugin sends requests only to Baidu Open Platform endpoints
+(`pan.baidu.com`, `d.pcs.baidu.com`, and hosts returned by Baidu's
+`locateupload` response). It does not send telemetry or data to any other
+service. AppKey, AppSecret, OAuth tokens and the optional E2EE password are
+stored locally in the plugin's `data.json` and are never included in this
+repository.
 
-Existing settings under .obsidian/plugins/baidu-netdisk-sync/ are not migrated automatically. Copy data.json into the new folder only if you intend to reuse the old authorization and sync settings.
+## Install manually
 
-The repository contains no credentials, tokens, native-state.json, sync_manifest.json or native-renames.json.
+1. Download `main.js`, `manifest.json` and `styles.css` from the latest GitHub
+   release.
+2. Put them in `<vault>/.obsidian/plugins/baidu-netdisk-sync-plus/`.
+3. Reload Obsidian and enable **Baidu Netdisk Sync Plus**.
+4. Create a Baidu Open Platform application and enter its AppKey and AppSecret
+   in the plugin settings.
+
+Existing settings under `.obsidian/plugins/baidu-netdisk-sync/` are not migrated
+automatically. Copy `data.json` only if you intend to reuse the old
+authorization and sync settings.
+
+## Build from source
+
+```bash
+npm install
+npm test
+npm run build
+```
+
+`npm test` runs the original TypeScript unit tests and the native sync engine
+tests. `npm run build` bundles `src/entry.ts` to `main.js`.
+
+The source tree contains the original TypeScript modules under `src/`, the
+native Baidu API reconciler in `src/native-sync.js`, and the bundle entry point
+in `src/entry.ts`.
 
 ## Attribution and license
 
-Based on owl234/obsidian-baidu-netdisk-sync. Both the original and this modified build use the MIT License. See [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
+Based on [owl234/obsidian-baidu-netdisk-sync](https://github.com/owl234/obsidian-baidu-netdisk-sync).
+The original author is credited in [NOTICE.md](NOTICE.md). Both the original
+project and this modified build use the MIT License; see [LICENSE](LICENSE).
 
-## Marketplace
-
-This release uses a unique plugin ID and is ready for submission to the Obsidian community plugin list. The release tag 1.0.2 matches manifest.json and includes main.js, manifest.json, styles.css and a zip asset.
-
+This repository contains no Baidu credentials, tokens, sync manifest, native
+state or machine-specific sync data.
