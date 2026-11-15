@@ -24,6 +24,7 @@ function createNativeSync(deps) {
   const stamp = r => r ? JSON.stringify([String(r.fsId), r.size, r.mtime, r.md5 || '']) : null;
   const sameRemote = (a,b) => stamp(a) === stamp(b);
   const labels={ADOPT:'内容一致，建立同步记录',VERIFY:'核对两端内容',UPLOAD:'上传本地修改',DOWNLOAD:'下载云端修改',CONFLICT:'冲突：保留双方版本',MOVE_LOCAL:'同步云端重命名到本地',MOVE_REMOTE:'同步本地重命名到云端',DELETE_LOCAL:'移入本地回收站',DELETE_REMOTE:'移入网盘回收站',FORGET:'清理已不存在文件的同步记录'};
+  const itemLabel = x => x.action==='UPLOAD'&&!x.remote?'上传本地新增':x.action==='DOWNLOAD'&&!x.local?'下载云端新增':labels[x.action];
   const conflictChoices={local:'保留本地',remote:'保留云端',both:'保留双方',skip:'跳过'};
   const normalize = (f, base) => {
     const path = relative(f.path, base);
@@ -217,7 +218,7 @@ function createNativeSync(deps) {
       let state;
       if(await this.adapter.exists(this.statePath)) {try{state=JSON.parse(await this.adapter.read(this.statePath));}catch{fail('本地同步基线损坏，请先恢复 native-state.json');}}
       if(state && state.version!==2)fail('本地同步基线版本不支持');
-      if(!state || state.scope!==scope) {state={version:2,scope,adopted:false,files:{},uploads:{}};this.log('info','首次同步：先核对两端内容，不沿用旧索引或旧删除记录');}
+      if(!state || state.scope!==scope) {state={version:2,scope,adopted:false,files:{},uploads:{}};this.log('info','首次同步：正在核对两端文件');}
       if(!state.files || !state.uploads)fail('本地同步基线不完整');
       for(const [p,b] of Object.entries(state.files)) {relative(this.base+'/'+p,this.base);if(!b.local?.hash||!b.remote||b.remote.remotePath!==this.base+'/'+p)fail('本地同步基线条目无效');}
       this.state=state;this.settings={...settings};this.e.filter.updateSettings(settings);
@@ -249,13 +250,19 @@ function createNativeSync(deps) {
       if(windows) {const paths=new Map();for(const p of new Set([...local.keys(),...remote.keys()])) {const key=p.toLowerCase();if(paths.has(key)&&paths.get(key)!==p)fail('Windows 文件名大小写冲突：'+p);paths.set(key,p);
         if(p.split('/').some(x=>/[<>:"|?*]/.test(x)||/[ .]$/.test(x)||/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(x)))fail('Windows 不支持云端文件名：'+p);}}
       const items=plan(local,remote,baseline,this.base);
-      let verified=0,total=items.filter(x=>x.action==='VERIFY').length;
+      // A changed baseline or cloud revision does not prove the two current
+      // versions differ. Compare plaintext before offering conflicts or transfers.
+      const needsComparison=x=>x.local&&x.remote&&['VERIFY','UPLOAD','DOWNLOAD','CONFLICT'].includes(x.action);
+      let verified=0,total=items.filter(needsComparison).length;
       for(const x of items) {
-        if(x.action!=='VERIFY')continue;
+        if(!needsComparison(x))continue;
         if(this.stopped)fail('插件已卸载，停止核对');
         const downloaded=await this.api.download(x.remote,this.settings);
-        x.action=await hash(downloaded)===x.local.hash?'ADOPT':'CONFLICT';
-        if(++verified%10===0 || verified===total)this.log('info',`首次内容核对：${verified}/${total}`);
+        await this.checkLocal(x.path,x.local);
+        await this.checkRemote(x.path,x.remote);
+        if(await hash(downloaded)===x.local.hash)x.action='ADOPT';
+        else if(x.action==='VERIFY')x.action='CONFLICT';
+        if(++verified%10===0 || verified===total)this.log('info',`内容核对：${verified}/${total}`);
       }
       return items;
     }
@@ -442,14 +449,15 @@ function createNativeSync(deps) {
       e.setState('preparing','同步准备');const stats={uploaded:0,downloaded:0,deleted:0,errors:0,pending:0,conflicts:0};
       try {
         await this.load(e.getSettings());this.runId=Date.now()+'-'+Math.random().toString(36).slice(2,8);
+        this.log('info','同步目录：'+this.base);
         const previewOnly=preview||(silent&&!this.state.adopted);
         if(previewOnly){const pending=await this.loadRenames();if(pending.length)this.log('info',`待处理重命名 ${pending.length} 项；预览不执行`);}
         else await this.applyRenames();
         e.setState('diffing','读取本地内容与网盘文件列表');let items=await this.scan();
         await this.adapter.write(this.planPath,JSON.stringify({at:new Date().toISOString(),base:this.base,firstRun:!this.state.adopted,items},null,2));
-        const counts={};for(const x of items)counts[x.action]=(counts[x.action]||0)+1;
-        this.log('info','同步计划：'+Object.entries(counts).map(([k,n])=>`${labels[k]} ${n} 项`).join('，'));
-        if(previewOnly){this.log('info',this.state.adopted?'预览已保存；未修改任何文件':'预览已保存；首次切换请手动审阅并同步');e.setState('idle','预览完成');return {success:true,preview:true,counts,items};}
+        const counts={},summaryCounts={};for(const x of items){counts[x.action]=(counts[x.action]||0)+1;const label=itemLabel(x);summaryCounts[label]=(summaryCounts[label]||0)+1;}
+        this.log('info','同步计划：'+(Object.entries(summaryCounts).map(([label,n])=>`${label} ${n} 项`).join('，')||'无变化'));
+        if(previewOnly){this.log('info',this.state.adopted?'预览已保存；未修改任何文件':'预览完成，请确认同步目录后开始同步');e.setState('idle','预览完成');return {success:true,preview:true,counts,items};}
         const conflicts=items.filter(x=>x.action==='CONFLICT');const promptConflicts=!silent||String(trigger).includes('启动');
         if(conflicts.length){
           if(!promptConflicts){stats.conflicts=conflicts.length;items=items.filter(x=>x.action!=='CONFLICT');this.log('warn',`发现 ${stats.conflicts} 个冲突，后台自动同步暂不处理；请手动同步后选择`);}
@@ -465,13 +473,15 @@ function createNativeSync(deps) {
         }
         if(!items.length){
           if(stats.conflicts){this.log('warn',`同步完成：${stats.conflicts} 项冲突待处理`);e.setState('idle',`${stats.conflicts} 项冲突待处理`);return {success:false,stats,counts};}
+          this.state.adopted=true;this.state.lastSync=Date.now();await this.persist();
           this.log('success','同步完成：两端已一致，无需传输');e.setState('idle','同步完成（无变化）');return {success:true,stats,counts};
         }
-        if(confirm && items.some(x=>x.action.startsWith('DELETE_')) && !await this.confirm(items)){e.setState('idle','已取消');return {success:false,cancelled:true};}
+        const firstTransfers=!this.state.adopted&&items.some(x=>!['ADOPT','FORGET'].includes(x.action));
+        if(confirm && (firstTransfers||items.some(x=>x.action.startsWith('DELETE_'))) && !await this.confirm(items)){e.setState('idle','已取消');return {success:false,cancelled:true};}
         e.setState('syncing','执行双向同步');
         for(const x of items){
           if(x.action.startsWith('DELETE_') && !confirm){stats.pending++;this.log('warn','删除待手动确认：'+x.path);continue;}
-          try {await this.execute(x);this.log('success',labels[x.action]+'：'+x.path);if(x.action==='UPLOAD')stats.uploaded++;else if(x.action==='DOWNLOAD')stats.downloaded++;else if(x.action.startsWith('DELETE_'))stats.deleted++;}
+          try {await this.execute(x);this.log('success',itemLabel(x)+'：'+x.path);if(x.action==='UPLOAD')stats.uploaded++;else if(x.action==='DOWNLOAD')stats.downloaded++;else if(x.action.startsWith('DELETE_'))stats.deleted++;}
           catch(err){stats.errors++;this.log('error',x.path+'：'+safeError(err));break;}
         }
         if(!stats.errors){this.state.adopted=true;this.state.lastSync=Date.now();await this.persist();}
@@ -483,12 +493,13 @@ function createNativeSync(deps) {
       }catch(err){this.log('error',safeError(err));e.setState('error',safeError(err));return {success:false,error:safeError(err),stats:{...stats,errors:stats.errors+1}};}
     }
     confirm(items) {
+      const target=this.base;
       return new Promise(resolve=>{
         let accepted=false;
         class Review extends Modal {
-          onOpen(){this.contentEl.createEl('h2',{text:'审阅本次同步'});this.contentEl.createEl('p',{text:'将按下列计划同步。冲突保留双方内容，删除项移入回收站。执行前会再次核对文件。'});
+          onOpen(){this.contentEl.createEl('h2',{text:'审阅本次同步'});this.contentEl.createEl('p',{text:'同步目录：'+target});this.contentEl.createEl('p',{text:'请确认目录和下列操作。内容一致的文件只建立同步记录；删除项移入回收站。'});
             const box=this.contentEl.createDiv({cls:'baidu-conflict-scroll'});
-            for(const x of items)box.createEl('p',{text:`${labels[x.action]}  ${x.oldPath?x.oldPath+' → ':''}${x.path}`});
+            for(const x of items)box.createEl('p',{text:`${itemLabel(x)}  ${x.oldPath?x.oldPath+' → ':''}${x.path}`});
             new Setting(this.contentEl).addButton(b=>b.setButtonText('取消').onClick(()=>this.close())).addButton(b=>b.setButtonText('确认这些操作并同步').setCta().onClick(()=>{accepted=true;this.close();}));}
           onClose(){this.contentEl.empty();resolve(accepted);}
         }

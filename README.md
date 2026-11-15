@@ -11,6 +11,11 @@ shared remote index.
 
 ## Features
 
+- Reinstalling against the same cloud folder compares file content before
+  transferring: identical files only establish the device's sync baseline.
+- First transfers show the target folder and operations for confirmation.
+  New files and modified files are labeled separately in the sync log.
+
 - Per-device baseline with SHA-256 local content hashes and cloud revision
   metadata.
 - Conflict table with four choices: keep local, keep cloud, keep both, or skip.
@@ -45,6 +50,11 @@ repository.
 Existing settings under `.obsidian/plugins/baidu-netdisk-sync/` are not migrated
 automatically. Copy `data.json` only if you intend to reuse the old
 authorization and sync settings.
+
+When reinstalling, select the same Baidu account and **exact remote folder** as
+before. A different remote folder is a different sync destination. Initial
+content verification may download files for comparison, but identical content
+is not uploaded again. Keep only one sync plugin active for the same vault.
 
 ## Build from source
 

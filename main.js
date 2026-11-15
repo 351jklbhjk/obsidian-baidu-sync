@@ -63,6 +63,7 @@ var require_native_sync = __commonJS({
       const stamp = (r) => r ? JSON.stringify([String(r.fsId), r.size, r.mtime, r.md5 || ""]) : null;
       const sameRemote = (a, b) => stamp(a) === stamp(b);
       const labels = { ADOPT: "\u5185\u5BB9\u4E00\u81F4\uFF0C\u5EFA\u7ACB\u540C\u6B65\u8BB0\u5F55", VERIFY: "\u6838\u5BF9\u4E24\u7AEF\u5185\u5BB9", UPLOAD: "\u4E0A\u4F20\u672C\u5730\u4FEE\u6539", DOWNLOAD: "\u4E0B\u8F7D\u4E91\u7AEF\u4FEE\u6539", CONFLICT: "\u51B2\u7A81\uFF1A\u4FDD\u7559\u53CC\u65B9\u7248\u672C", MOVE_LOCAL: "\u540C\u6B65\u4E91\u7AEF\u91CD\u547D\u540D\u5230\u672C\u5730", MOVE_REMOTE: "\u540C\u6B65\u672C\u5730\u91CD\u547D\u540D\u5230\u4E91\u7AEF", DELETE_LOCAL: "\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9", DELETE_REMOTE: "\u79FB\u5165\u7F51\u76D8\u56DE\u6536\u7AD9", FORGET: "\u6E05\u7406\u5DF2\u4E0D\u5B58\u5728\u6587\u4EF6\u7684\u540C\u6B65\u8BB0\u5F55" };
+      const itemLabel = (x) => x.action === "UPLOAD" && !x.remote ? "\u4E0A\u4F20\u672C\u5730\u65B0\u589E" : x.action === "DOWNLOAD" && !x.local ? "\u4E0B\u8F7D\u4E91\u7AEF\u65B0\u589E" : labels[x.action];
       const conflictChoices = { local: "\u4FDD\u7559\u672C\u5730", remote: "\u4FDD\u7559\u4E91\u7AEF", both: "\u4FDD\u7559\u53CC\u65B9", skip: "\u8DF3\u8FC7" };
       const normalize = (f, base) => {
         const path = relative(f.path, base);
@@ -355,7 +356,7 @@ var require_native_sync = __commonJS({
           if (state && state.version !== 2) fail("\u672C\u5730\u540C\u6B65\u57FA\u7EBF\u7248\u672C\u4E0D\u652F\u6301");
           if (!state || state.scope !== scope) {
             state = { version: 2, scope, adopted: false, files: {}, uploads: {} };
-            this.log("info", "\u9996\u6B21\u540C\u6B65\uFF1A\u5148\u6838\u5BF9\u4E24\u7AEF\u5185\u5BB9\uFF0C\u4E0D\u6CBF\u7528\u65E7\u7D22\u5F15\u6216\u65E7\u5220\u9664\u8BB0\u5F55");
+            this.log("info", "\u9996\u6B21\u540C\u6B65\uFF1A\u6B63\u5728\u6838\u5BF9\u4E24\u7AEF\u6587\u4EF6");
           }
           if (!state.files || !state.uploads) fail("\u672C\u5730\u540C\u6B65\u57FA\u7EBF\u4E0D\u5B8C\u6574");
           for (const [p, b] of Object.entries(state.files)) {
@@ -420,13 +421,17 @@ var require_native_sync = __commonJS({
             }
           }
           const items = plan(local, remote, baseline, this.base);
-          let verified = 0, total = items.filter((x) => x.action === "VERIFY").length;
+          const needsComparison = (x) => x.local && x.remote && ["VERIFY", "UPLOAD", "DOWNLOAD", "CONFLICT"].includes(x.action);
+          let verified = 0, total = items.filter(needsComparison).length;
           for (const x of items) {
-            if (x.action !== "VERIFY") continue;
+            if (!needsComparison(x)) continue;
             if (this.stopped) fail("\u63D2\u4EF6\u5DF2\u5378\u8F7D\uFF0C\u505C\u6B62\u6838\u5BF9");
             const downloaded = await this.api.download(x.remote, this.settings);
-            x.action = await hash(downloaded) === x.local.hash ? "ADOPT" : "CONFLICT";
-            if (++verified % 10 === 0 || verified === total) this.log("info", `\u9996\u6B21\u5185\u5BB9\u6838\u5BF9\uFF1A${verified}/${total}`);
+            await this.checkLocal(x.path, x.local);
+            await this.checkRemote(x.path, x.remote);
+            if (await hash(downloaded) === x.local.hash) x.action = "ADOPT";
+            else if (x.action === "VERIFY") x.action = "CONFLICT";
+            if (++verified % 10 === 0 || verified === total) this.log("info", `\u5185\u5BB9\u6838\u5BF9\uFF1A${verified}/${total}`);
           }
           return items;
         }
@@ -765,6 +770,7 @@ var require_native_sync = __commonJS({
           try {
             await this.load(e.getSettings());
             this.runId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+            this.log("info", "\u540C\u6B65\u76EE\u5F55\uFF1A" + this.base);
             const previewOnly = preview || silent && !this.state.adopted;
             if (previewOnly) {
               const pending = await this.loadRenames();
@@ -773,11 +779,15 @@ var require_native_sync = __commonJS({
             e.setState("diffing", "\u8BFB\u53D6\u672C\u5730\u5185\u5BB9\u4E0E\u7F51\u76D8\u6587\u4EF6\u5217\u8868");
             let items = await this.scan();
             await this.adapter.write(this.planPath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), base: this.base, firstRun: !this.state.adopted, items }, null, 2));
-            const counts = {};
-            for (const x of items) counts[x.action] = (counts[x.action] || 0) + 1;
-            this.log("info", "\u540C\u6B65\u8BA1\u5212\uFF1A" + Object.entries(counts).map(([k, n]) => `${labels[k]} ${n} \u9879`).join("\uFF0C"));
+            const counts = {}, summaryCounts = {};
+            for (const x of items) {
+              counts[x.action] = (counts[x.action] || 0) + 1;
+              const label = itemLabel(x);
+              summaryCounts[label] = (summaryCounts[label] || 0) + 1;
+            }
+            this.log("info", "\u540C\u6B65\u8BA1\u5212\uFF1A" + (Object.entries(summaryCounts).map(([label, n]) => `${label} ${n} \u9879`).join("\uFF0C") || "\u65E0\u53D8\u5316"));
             if (previewOnly) {
-              this.log("info", this.state.adopted ? "\u9884\u89C8\u5DF2\u4FDD\u5B58\uFF1B\u672A\u4FEE\u6539\u4EFB\u4F55\u6587\u4EF6" : "\u9884\u89C8\u5DF2\u4FDD\u5B58\uFF1B\u9996\u6B21\u5207\u6362\u8BF7\u624B\u52A8\u5BA1\u9605\u5E76\u540C\u6B65");
+              this.log("info", this.state.adopted ? "\u9884\u89C8\u5DF2\u4FDD\u5B58\uFF1B\u672A\u4FEE\u6539\u4EFB\u4F55\u6587\u4EF6" : "\u9884\u89C8\u5B8C\u6210\uFF0C\u8BF7\u786E\u8BA4\u540C\u6B65\u76EE\u5F55\u540E\u5F00\u59CB\u540C\u6B65");
               e.setState("idle", "\u9884\u89C8\u5B8C\u6210");
               return { success: true, preview: true, counts, items };
             }
@@ -811,11 +821,15 @@ var require_native_sync = __commonJS({
                 e.setState("idle", `${stats.conflicts} \u9879\u51B2\u7A81\u5F85\u5904\u7406`);
                 return { success: false, stats, counts };
               }
+              this.state.adopted = true;
+              this.state.lastSync = Date.now();
+              await this.persist();
               this.log("success", "\u540C\u6B65\u5B8C\u6210\uFF1A\u4E24\u7AEF\u5DF2\u4E00\u81F4\uFF0C\u65E0\u9700\u4F20\u8F93");
               e.setState("idle", "\u540C\u6B65\u5B8C\u6210\uFF08\u65E0\u53D8\u5316\uFF09");
               return { success: true, stats, counts };
             }
-            if (confirm && items.some((x) => x.action.startsWith("DELETE_")) && !await this.confirm(items)) {
+            const firstTransfers = !this.state.adopted && items.some((x) => !["ADOPT", "FORGET"].includes(x.action));
+            if (confirm && (firstTransfers || items.some((x) => x.action.startsWith("DELETE_"))) && !await this.confirm(items)) {
               e.setState("idle", "\u5DF2\u53D6\u6D88");
               return { success: false, cancelled: true };
             }
@@ -828,7 +842,7 @@ var require_native_sync = __commonJS({
               }
               try {
                 await this.execute(x);
-                this.log("success", labels[x.action] + "\uFF1A" + x.path);
+                this.log("success", itemLabel(x) + "\uFF1A" + x.path);
                 if (x.action === "UPLOAD") stats.uploaded++;
                 else if (x.action === "DOWNLOAD") stats.downloaded++;
                 else if (x.action.startsWith("DELETE_")) stats.deleted++;
@@ -855,14 +869,16 @@ var require_native_sync = __commonJS({
           }
         }
         confirm(items) {
+          const target = this.base;
           return new Promise((resolve) => {
             let accepted = false;
             class Review extends Modal4 {
               onOpen() {
                 this.contentEl.createEl("h2", { text: "\u5BA1\u9605\u672C\u6B21\u540C\u6B65" });
-                this.contentEl.createEl("p", { text: "\u5C06\u6309\u4E0B\u5217\u8BA1\u5212\u540C\u6B65\u3002\u51B2\u7A81\u4FDD\u7559\u53CC\u65B9\u5185\u5BB9\uFF0C\u5220\u9664\u9879\u79FB\u5165\u56DE\u6536\u7AD9\u3002\u6267\u884C\u524D\u4F1A\u518D\u6B21\u6838\u5BF9\u6587\u4EF6\u3002" });
+                this.contentEl.createEl("p", { text: "\u540C\u6B65\u76EE\u5F55\uFF1A" + target });
+                this.contentEl.createEl("p", { text: "\u8BF7\u786E\u8BA4\u76EE\u5F55\u548C\u4E0B\u5217\u64CD\u4F5C\u3002\u5185\u5BB9\u4E00\u81F4\u7684\u6587\u4EF6\u53EA\u5EFA\u7ACB\u540C\u6B65\u8BB0\u5F55\uFF1B\u5220\u9664\u9879\u79FB\u5165\u56DE\u6536\u7AD9\u3002" });
                 const box = this.contentEl.createDiv({ cls: "baidu-conflict-scroll" });
-                for (const x of items) box.createEl("p", { text: `${labels[x.action]}  ${x.oldPath ? x.oldPath + " \u2192 " : ""}${x.path}` });
+                for (const x of items) box.createEl("p", { text: `${itemLabel(x)}  ${x.oldPath ? x.oldPath + " \u2192 " : ""}${x.path}` });
                 new Setting5(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u8FD9\u4E9B\u64CD\u4F5C\u5E76\u540C\u6B65").setCta().onClick(() => {
                   accepted = true;
                   this.close();

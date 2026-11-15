@@ -1,6 +1,6 @@
 {
   "name": "obsidian-baidu-netdisk-sync-plus",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Baidu Netdisk two-way sync for Obsidian with per-device baselines and conflict choices.",
   "main": "main.js",
   "scripts": {

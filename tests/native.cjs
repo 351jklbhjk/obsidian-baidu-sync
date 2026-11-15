@@ -153,6 +153,53 @@ test('successful sync writes an explicit completion log',async()=>{
 test('non-zero sync reports upload and download counts in the completion log',async()=>{
  const {runner,e}=fixture();const logs=[];e.addLog=(level,message)=>logs.push([level,message]);runner.load=async()=>{};runner.scan=async()=>[{action:'UPLOAD',path:'a'}];runner.execute=async()=>{};await runner.run({silent:true});assert(logs.some(([level,message])=>level==='success'&&message==='同步完成：上传 1，下载 0，删除 0'));
 });
+test('fresh installation adopts identical cloud files without uploading; next scan is empty',async()=>{
+ const {runner,adapter}=fixture();await adapter.writeBinary('a.md',bytes('abc'));
+ const remote=r();runner.state.files={};runner.state.adopted=false;
+ runner.api.listAll=async()=>new Map([['a.md',remote]]);runner.api.lookup=async()=>remote;
+ runner.api.download=async()=>bytes('abc');runner.api.upload=async()=>assert.fail('identical files must not upload');
+ const items=await runner.scan();assert.equal(items[0].action,'ADOPT');await runner.execute(items[0]);
+ runner.api.download=async()=>assert.fail('unchanged baseline should need no download');
+ assert.deepEqual(await runner.scan(),[]);
+});
+test('timestamp-only local change causes no transfer',async()=>{
+ const {runner,adapter,files}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md');
+ runner.state.files={'a.md':{local,remote:r()}};files.get('a.md').t+=10000;
+ runner.api.listAll=async()=>new Map([['a.md',r()]]);runner.api.download=async()=>assert.fail('must not download');
+ assert.deepEqual(await runner.scan(),[]);
+});
+test('equal current content adopts stale local, remote, or both baselines',async()=>{
+ for(const mode of ['local','remote','both']){
+  const {runner,adapter}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md'),remote=r();
+  runner.state.files={'a.md':{local:{...local,hash:mode==='remote'?local.hash:'old'},remote:mode==='local'?remote:{...remote,mtime:0}}};
+  runner.api.listAll=async()=>new Map([['a.md',remote]]);runner.api.lookup=async()=>remote;runner.api.download=async()=>bytes('abc');
+  assert.equal((await runner.scan())[0].action,'ADOPT');
+ }
+});
+test('different content preserves upload/download/conflict directions',async()=>{
+ for(const mode of ['UPLOAD','DOWNLOAD','CONFLICT','VERIFY']){
+  const {runner,adapter}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md'),remote=r();
+  runner.state.files=mode==='VERIFY'?{}:{'a.md':{local:{...local,hash:mode==='DOWNLOAD'?local.hash:'old'},remote:mode==='UPLOAD'?remote:{...remote,mtime:0}}};
+  runner.api.listAll=async()=>new Map([['a.md',remote]]);runner.api.lookup=async()=>remote;runner.api.download=async()=>bytes('xyz');
+  assert.equal((await runner.scan())[0].action,mode==='VERIFY'?'CONFLICT':mode);
+ }
+});
+test('new remote target requires review and labels missing files as new',async()=>{
+ const {runner,e}=fixture();runner.state.adopted=false;runner.load=async()=>{};
+ runner.scan=async()=>[{action:'UPLOAD',path:'a.md',local:l()}];const logs=[];e.addLog=(level,message)=>logs.push(message);
+ let reviews=0;runner.confirm=async()=>{reviews++;return false;};runner.execute=async()=>assert.fail('cancelled initial transfer');
+ const result=await runner.run({confirm:true});assert(result.cancelled);assert.equal(reviews,1);
+ assert(logs.some(x=>x.includes('上传本地新增')));assert(!logs.some(x=>x.includes('上传本地修改')));assert(logs.includes('同步目录：/root'));
+});
+test('cloud or local change during comparison fails closed',async()=>{
+ for(const side of ['local','remote']){
+  const {runner,adapter}=fixture();await adapter.writeBinary('a.md',bytes('abc'));runner.state.files={};
+  runner.api.listAll=async()=>new Map([['a.md',r()]]);
+  runner.api.lookup=async()=>side==='remote'?r('a.md',1,'new'):r();
+  runner.api.download=async()=>{if(side==='local')await adapter.writeBinary('a.md',bytes('edit'));return bytes('abc');};
+  await assert.rejects(()=>runner.scan());assert.deepEqual(runner.state.files,{});
+ }
+});
 test('automatic sync holds conflicts and never auto-duplicates them',async()=>{
  const {runner,e}=fixture();const logs=[];e.addLog=(level,message)=>logs.push([level,message]);runner.load=async()=>{};let executed=0;runner.scan=async()=>[{action:'CONFLICT',path:'a.md',local:l('a.md'),remote:r('a.md')}];runner.execute=async()=>{executed++;};const result=await runner.run({silent:true});assert.equal(executed,0);assert.equal(result.stats.conflicts,1);assert.equal(result.success,false);assert(logs.some(([level,message])=>level==='warn'&&message.includes('1 项冲突待处理')));
 });
