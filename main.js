@@ -38,8 +38,9 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var require_native_sync = __commonJS({
   "src/native-sync.js"(exports, module2) {
     function createNativeSync2(deps) {
-      const { requestUrl: requestUrl4, md5: md52, encryptData: encryptData2, decryptData: decryptData2, isEncrypted: isEncrypted2, buildMultipartFormData: buildMultipartFormData2, crypto: crypto2, Notice: Notice5, Modal: Modal4, Setting: Setting5, Platform: Platform2 = { isWin: false } } = deps;
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const { requestUrl: requestUrl4, md5: md52, encryptData: encryptData2, decryptData: decryptData2, isEncrypted: isEncrypted2, buildMultipartFormData: buildMultipartFormData2, crypto: crypto2, Modal: Modal4, Setting: Setting5, Platform: Platform2 = { isWin: false } } = deps;
+      const later = (fn, ms) => typeof window !== "undefined" ? window.setTimeout(fn, ms) : globalThis.setTimeout(fn, ms);
+      const sleep = (ms) => new Promise((r) => later(r, ms));
       const fail = (message) => {
         throw new Error(message);
       };
@@ -512,7 +513,7 @@ var require_native_sync = __commonJS({
             const a = await this.api.lookup(oldRemotePath, this.base), b = await this.api.lookup(newRemotePath, this.base);
             if (!a && b) return b;
             if (a && b) fail("\u4E91\u7AEF\u91CD\u547D\u540D\u540E\u65B0\u65E7\u8DEF\u5F84\u540C\u65F6\u5B58\u5728");
-            await new Promise((r) => setTimeout(r, 1e3));
+            await new Promise((r) => later(r, 1e3));
           }
           fail("\u4E91\u7AEF\u6587\u4EF6\u5939\u91CD\u547D\u540D\u5C1A\u672A\u5B8C\u6210\uFF0C\u4FDD\u7559\u8BB0\u5F55\u5F85\u91CD\u8BD5");
         }
@@ -858,9 +859,7 @@ var require_native_sync = __commonJS({
               onOpen() {
                 this.contentEl.createEl("h2", { text: "\u5BA1\u9605\u672C\u6B21\u540C\u6B65" });
                 this.contentEl.createEl("p", { text: "\u5C06\u6309\u4E0B\u5217\u8BA1\u5212\u540C\u6B65\u3002\u51B2\u7A81\u4FDD\u7559\u53CC\u65B9\u5185\u5BB9\uFF0C\u5220\u9664\u9879\u79FB\u5165\u56DE\u6536\u7AD9\u3002\u6267\u884C\u524D\u4F1A\u518D\u6B21\u6838\u5BF9\u6587\u4EF6\u3002" });
-                const box = this.contentEl.createDiv();
-                box.style.maxHeight = "55vh";
-                box.style.overflow = "auto";
+                const box = this.contentEl.createDiv({ cls: "baidu-conflict-scroll" });
                 for (const x of items) box.createEl("p", { text: `${labels[x.action]}  ${x.oldPath ? x.oldPath + " \u2192 " : ""}${x.path}` });
                 new Setting5(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u8FD9\u4E9B\u64CD\u4F5C\u5E76\u540C\u6B65").setCta().onClick(() => {
                   accepted = true;
@@ -3125,7 +3124,6 @@ var nativeSync = (0, import_native_sync.createNativeSync)({
   isEncrypted,
   buildMultipartFormData,
   crypto: getCrypto,
-  Notice: import_obsidian8.Notice,
   Modal: import_obsidian8.Modal,
   Setting: import_obsidian8.Setting,
   Platform: import_obsidian8.Platform

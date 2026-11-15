@@ -1,7 +1,8 @@
 /* Native Baidu API reconciliation. Bundled by build-native.py. No shared index. */
 function createNativeSync(deps) {
-  const {requestUrl, md5, encryptData, decryptData, isEncrypted, buildMultipartFormData, crypto, Notice, Modal, Setting, Platform = {isWin:false}} = deps;
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const {requestUrl, md5, encryptData, decryptData, isEncrypted, buildMultipartFormData, crypto, Modal, Setting, Platform = {isWin:false}} = deps;
+  const later = (fn, ms) => (typeof window !== "undefined" ? window.setTimeout(fn, ms) : globalThis.setTimeout(fn, ms));
+  const sleep = ms => new Promise(r => later(r, ms));
   const fail = message => { throw new Error(message); };
   const safeError = e => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, '$1=[redacted]');
   const hash = async b => Array.from(new Uint8Array(await crypto().subtle.digest('SHA-256', b)), n => n.toString(16).padStart(2,'0')).join('');
@@ -295,7 +296,7 @@ function createNativeSync(deps) {
         const a=await this.api.lookup(oldRemotePath,this.base),b=await this.api.lookup(newRemotePath,this.base);
         if(!a&&b)return b;
         if(a&&b)fail('云端重命名后新旧路径同时存在');
-        await new Promise(r=>setTimeout(r,1000));
+        await new Promise(r=>later(r,1000));
       }
       fail('云端文件夹重命名尚未完成，保留记录待重试');
     }
@@ -484,7 +485,7 @@ function createNativeSync(deps) {
         let accepted=false;
         class Review extends Modal {
           onOpen(){this.contentEl.createEl('h2',{text:'审阅本次同步'});this.contentEl.createEl('p',{text:'将按下列计划同步。冲突保留双方内容，删除项移入回收站。执行前会再次核对文件。'});
-            const box=this.contentEl.createDiv();box.style.maxHeight='55vh';box.style.overflow='auto';
+            const box=this.contentEl.createDiv({cls:'baidu-conflict-scroll'});
             for(const x of items)box.createEl('p',{text:`${labels[x.action]}  ${x.oldPath?x.oldPath+' → ':''}${x.path}`});
             new Setting(this.contentEl).addButton(b=>b.setButtonText('取消').onClick(()=>this.close())).addButton(b=>b.setButtonText('确认这些操作并同步').setCta().onClick(()=>{accepted=true;this.close();}));}
           onClose(){this.contentEl.empty();resolve(accepted);}
