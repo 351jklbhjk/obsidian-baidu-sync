@@ -1783,6 +1783,8 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
   }
   setupTriggers() {
     if (this.settings.syncOnStartup && this.settings.accessToken) {
+      this.startupGraceUntil = Date.now() + 10000;
+      if (this.saveDebounceTimer !== null) { window.clearTimeout(this.saveDebounceTimer); this.saveDebounceTimer = null; }
       this.engine.addLog("info", "启动自动同步已安排，将于 3 秒后执行");
       this.startupTimer = window.setTimeout(async () => {
         await this.engine.startSync(true, "启动自动");
@@ -1791,8 +1793,9 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
     this.resetInterval();
     const onVaultChange = (file) => {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
+      if (Date.now() < (this.startupGraceUntil || 0)) return;
       if (this.engine.isSyncing()) return;
-      if (file.path.includes("sync_manifest.json") || file.path.includes("native-state.json") || file.path.includes("native-plan.json") || file.path.includes("workspace")) return;
+      if (file.path.includes("sync_manifest.json") || file.path.includes("native-state.json") || file.path.includes("native-plan.json") || file.path.includes("native-renames.json") || file.path.includes("workspace")) return;
       if (this.saveDebounceTimer !== null) {
         window.clearTimeout(this.saveDebounceTimer);
       }
@@ -1932,9 +1935,9 @@ function createNativeSync(deps) {
       if(isEncrypted(raw)) { if(!settings.e2eePassword) fail('缺少解密密码');return decryptData(raw,settings.e2eePassword); }
       return raw;
     }
-    async manage(op,items) {
+    async manage(op,items,options={}) {
       const d=await this.request('https://pan.baidu.com/rest/2.0/xpan/file',{method:'filemanager',opera:op},{async:'0',ondup:'fail',filelist:JSON.stringify(items)},{noRetry:true});
-      if(d.taskid || d.task_id) fail('文件管理返回异步任务，未确认完成，停止后续操作');
+      if(d.taskid || d.task_id){if(options.allowTask)return d;fail('文件管理返回异步任务，未确认完成，停止后续操作');}
       if(!Array.isArray(d.info) || d.info.length!==items.length || d.info.some((x,i)=>x.errno!==0 || x.path!==(typeof items[i]==='string'?items[i]:items[i].path))) fail('文件管理未全部成功');
       return d;
     }
@@ -2012,7 +2015,7 @@ function createNativeSync(deps) {
     constructor(engine) {
       this.e=engine;this.app=engine.app;this.adapter=this.app.vault.adapter;this.api=new Api(engine.client.oauth);
       const dir=engine.manifest.manifestFilePath.slice(0,engine.manifest.manifestFilePath.lastIndexOf('/'));
-      this.statePath=dir+'/native-state.json';this.planPath=dir+'/native-plan.json';this.stopped=false;
+      this.statePath=dir+'/native-state.json';this.planPath=dir+'/native-plan.json';this.renamesPath=dir+'/native-renames.json';this.renameQueue=Promise.resolve();this.stopped=false;
     }
     log(level,message){this.e.addLog(level,message);}
     async persist(){await this.adapter.write(this.statePath,JSON.stringify(this.state));}
@@ -2078,6 +2081,90 @@ function createNativeSync(deps) {
       fail('无法分配冲突文件名');
     }
     async record(path,l,r){this.state.files[path]={local:l,remote:r};await this.persist();}
+    async loadRenames(){
+      if(!await this.adapter.exists(this.renamesPath))return[];
+      let d;try{d=JSON.parse(await this.adapter.read(this.renamesPath));}catch{fail('本机重命名记录损坏');}
+      if(!d||d.version!==1||!Array.isArray(d.entries))fail('本机重命名记录版本不支持');
+      return d.entries.filter(e=>e&&typeof e.oldPath==='string'&&typeof e.newPath==='string'&&e.oldPath!==e.newPath&&(e.kind==='file'||e.kind==='folder'));
+    }
+    async saveRenames(entries){await this.adapter.write(this.renamesPath,JSON.stringify({version:1,entries}));}
+    async recordRename(oldPath,newPath,kind){
+      this.renameQueue=this.renameQueue.then(()=>this._recordRename(oldPath,newPath,kind),()=>this._recordRename(oldPath,newPath,kind));
+      return this.renameQueue;
+    }
+    async _recordRename(oldPath,newPath,kind){
+      if(!oldPath||!newPath||oldPath===newPath||!['file','folder'].includes(kind))return;
+      if([oldPath,newPath].some(p=>p.startsWith('.trash/')||p.startsWith('.baidu-native-history/')||p.includes('baidu-netdisk-sync')||p==='native-renames.json'))return;
+      let entries=await this.loadRenames();
+      entries=entries.filter(x=>!(x.oldPath===oldPath||x.newPath===newPath));
+      let merged={oldPath,newPath,kind,at:Date.now()},changed=true;
+      while(changed){changed=false;for(const x of entries){if(x.kind!==merged.kind)continue;if(merged.newPath===x.oldPath){merged.newPath=x.newPath;entries=entries.filter(y=>y!==x);changed=true;break;}if(merged.oldPath===x.newPath){merged.oldPath=x.oldPath;entries=entries.filter(y=>y!==x);changed=true;break;}}}
+      if(merged.oldPath!==merged.newPath)entries.push(merged);
+      const byOld=new Map();for(const x of entries)byOld.set(x.oldPath,x);
+      await this.saveRenames([...byOld.values()]);
+    }
+    async waitRemoteRename(oldRemotePath,newRemotePath,attempts=30){
+      for(let i=0;i<attempts;i++){
+        const a=await this.api.lookup(oldRemotePath,this.base),b=await this.api.lookup(newRemotePath,this.base);
+        if(!a&&b)return b;
+        if(a&&b)fail('云端重命名后新旧路径同时存在');
+        await new Promise(r=>setTimeout(r,1000));
+      }
+      fail('云端文件夹重命名尚未完成，保留记录待重试');
+    }
+    async rebaseAfterRename(e,moved){
+      if(e.kind==='file'){
+        const b=this.state.files[e.oldPath];delete this.state.files[e.oldPath];
+        if(b){this.state.files[e.newPath]={local:{...b.local,path:e.newPath},remote:{...moved,path:e.newPath,remotePath:this.base+'/'+e.newPath}};await this.persist();return;}
+        if(this.state.files[e.newPath])return;
+        const lf=await this.localFile(e.newPath);if(!lf)return;const bytes=await this.adapter.readBinary(e.newPath);await this.put(e.newPath,bytes,lf,moved);return;
+      }
+      const oldPrefix=e.oldPath.replace(/\/$/,''),newPrefix=e.newPath.replace(/\/$/,'');const movedKeys=[];let actual=new Map();
+      try{actual=await this.api.listAll(this.base+'/'+newPrefix);}catch(err){this.log('warn','文件夹改名后读取新目录元数据失败，将使用旧时间戳：'+safeError(err));}
+      for(const key of Object.keys(this.state.files)){
+        if(!key.startsWith(oldPrefix+'/'))continue;
+        const newKey=newPrefix+key.slice(oldPrefix.length);const b=this.state.files[key];
+        const fresh=actual.get(newKey.slice(newPrefix.length+1))||b.remote;
+        delete this.state.files[key];this.state.files[newKey]={local:{...b.local,path:newKey},remote:{...fresh,path:newKey,remotePath:this.base+'/'+newKey}};movedKeys.push(newKey);
+      }
+      await this.persist();
+      if(movedKeys.length)this.log('info',`已迁移 ${movedKeys.length} 个文件的重命名基线`);
+    }
+    async applyRename(e){
+      const oldLocal=await this.adapter.exists(e.oldPath),newLocal=await this.adapter.exists(e.newPath);
+      if(!oldLocal&&!newLocal){this.log('warn','本地旧路径和新路径都不存在，丢弃重命名记录：'+e.oldPath);return;}
+      if(oldLocal)fail('本地旧路径仍然存在，不能确认重命名：'+e.oldPath);
+      const oldRemote=await this.api.lookup(this.base+'/'+e.oldPath,this.base),newRemote=await this.api.lookup(this.base+'/'+e.newPath,this.base);
+      if(oldRemote&&newRemote)fail('云端新旧路径同时存在：'+e.oldPath);
+      if(!oldRemote&&newRemote){await this.rebaseAfterRename(e,newRemote);return;}
+      if(!oldRemote)fail('云端旧路径不存在：'+e.oldPath);
+      if(e.kind==='folder'&&oldRemote.isdir!==1)fail('云端旧路径不是文件夹：'+e.oldPath);
+      if(e.kind==='file'&&oldRemote.isdir!==0)fail('云端旧路径不是文件：'+e.oldPath);
+      const oldParent=e.oldPath.lastIndexOf('/')>0?e.oldPath.slice(0,e.oldPath.lastIndexOf('/')):'';
+      const newParent=e.newPath.lastIndexOf('/')>0?e.newPath.slice(0,e.newPath.lastIndexOf('/')):'';
+      const newName=e.newPath.split('/').pop();
+      const d=oldParent===newParent
+        ?await this.api.manage('rename',[{path:oldRemote.remotePath,newname:newName}],{allowTask:e.kind==='folder'})
+        :await this.api.manage('move',[{path:oldRemote.remotePath,dest:this.base+(newParent?'/'+newParent:''),newname:newName,ondup:'fail'}],{allowTask:e.kind==='folder'});
+      let moved;
+      if(d.taskid||d.task_id)moved=await this.waitRemoteRename(oldRemote.remotePath,this.base+'/'+e.newPath,e.kind==='folder'?60:10);
+      else moved=await this.api.lookup(this.base+'/'+e.newPath,this.base);
+      if(!moved)fail('云端重命名后新路径不存在：'+e.newPath);
+      if(e.kind==='file'&&moved.fsId!==oldRemote.fsId)fail('云端重命名后 fs_id 变化');
+      await this.rebaseAfterRename(e,moved);
+    }
+    async applyRenames(){
+      await this.renameQueue;const entries=await this.loadRenames();if(!entries.length)return;
+      entries.sort((a,b)=>(a.kind==='folder'?0:1)-(b.kind==='folder'?0:1)||a.oldPath.length-b.oldPath.length);
+      const remaining=[],renamedFolders=[];
+      for(const e of entries){
+        if(renamedFolders.some(f=>e.oldPath.startsWith(f.oldPath+'/')&&e.newPath===f.newPath+e.oldPath.slice(f.oldPath.length))){this.log('info','文件夹重命名已覆盖：'+e.oldPath);continue;}
+        try{await this.applyRename(e);this.log('success','云端重命名：'+e.oldPath+' → '+e.newPath);if(e.kind==='folder')renamedFolders.push(e);}
+        catch(err){remaining.push(e);this.log('error','重命名待处理：'+e.oldPath+' → '+e.newPath+'：'+safeError(err));}
+      }
+      await this.saveRenames(remaining);
+      if(remaining.length)fail(`有 ${remaining.length} 个重命名待处理，已停止本次同步`);
+    }
     async put(path,buffer,expectedLocal,expectedRemote) {
       await this.checkLocal(path,expectedLocal);await this.parents(path,true);await this.checkRemote(path,expectedRemote);
       await this.api.upload(this.base+'/'+path,buffer,this.settings,this.state.uploads,()=>this.persist(),async()=>{await this.checkLocal(path,expectedLocal);await this.checkRemote(path,expectedRemote);});
@@ -2165,11 +2252,14 @@ function createNativeSync(deps) {
       e.setState('preparing','同步准备');const stats={uploaded:0,downloaded:0,deleted:0,errors:0,pending:0,conflicts:0};
       try {
         await this.load(e.getSettings());this.runId=Date.now()+'-'+Math.random().toString(36).slice(2,8);
+        const previewOnly=preview||(silent&&!this.state.adopted);
+        if(previewOnly){const pending=await this.loadRenames();if(pending.length)this.log('info',`待处理重命名 ${pending.length} 项；预览不执行`);}
+        else await this.applyRenames();
         e.setState('diffing','读取本地内容与网盘文件列表');let items=await this.scan();
         await this.adapter.write(this.planPath,JSON.stringify({at:new Date().toISOString(),base:this.base,firstRun:!this.state.adopted,items},null,2));
         const counts={};for(const x of items)counts[x.action]=(counts[x.action]||0)+1;
         this.log('info','同步计划：'+Object.entries(counts).map(([k,n])=>`${labels[k]} ${n} 项`).join('，'));
-        if(preview || (silent && !this.state.adopted)){this.log('info',this.state.adopted?'预览已保存；未修改任何文件':'预览已保存；首次切换请手动审阅并同步');e.setState('idle','预览完成');return {success:true,preview:true,counts,items};}
+        if(previewOnly){this.log('info',this.state.adopted?'预览已保存；未修改任何文件':'预览已保存；首次切换请手动审阅并同步');e.setState('idle','预览完成');return {success:true,preview:true,counts,items};}
         const conflicts=items.filter(x=>x.action==='CONFLICT');const promptConflicts=!silent||String(trigger).includes('启动');
         if(conflicts.length){
           if(!promptConflicts){stats.conflicts=conflicts.length;items=items.filter(x=>x.action!=='CONFLICT');this.log('warn',`发现 ${stats.conflicts} 个冲突，后台自动同步暂不处理；请手动同步后选择`);}
@@ -2221,15 +2311,16 @@ function createNativeSync(deps) {
     const originalFilter=SyncFilter.prototype.shouldIgnore;
     SyncFilter.prototype.shouldIgnore=function(p){return reserved(p)||originalFilter.call(this,p);};
     SyncEngine.prototype.nativeRunner=function(){return this._nativeRunner||(this._nativeRunner=new Runner(this));};
-    SyncEngine.prototype.startSync=function(silent=false,trigger=''){return this.nativeRunner().run({silent,confirm:!silent,trigger});};
+    SyncEngine.prototype.startSync=function(silent=false,trigger=''){if(trigger==='启动自动'){const now=Date.now();if(this._lastStartupSync&&now-this._lastStartupSync<15000)return Promise.resolve({success:false,duplicate:true});this._lastStartupSync=now;}return this.nativeRunner().run({silent,confirm:!silent,trigger});};
     SyncEngine.prototype.previewNative=function(){return this.nativeRunner().run({preview:true});};
     // Prevent inherited legacy entry points from writing or reading the shared index.
     SyncEngine.prototype.writeRemoteIndex=async function(){throw new Error('当前版本不使用共享索引');};
     SyncEngine.prototype.loadRemoteIndex=async function(){throw new Error('当前版本不读取共享索引');};
     SyncEngine.prototype.convertVaultToPlaintext=async function(){throw new Error('请先完成同步，再单独规划加密迁移；本版本不执行旧版全量覆盖迁移');};
+    SyncEngine.prototype.recordRename=function(oldPath,newPath,kind){return this.nativeRunner().recordRename(oldPath,newPath,kind);};
     const oldLoad=BaiduSyncPlugin.prototype.onload,oldUnload=BaiduSyncPlugin.prototype.onunload;
-    BaiduSyncPlugin.prototype.onload=async function(){await oldLoad.call(this);this.addCommand({id:'baidu-native-preview',name:'预览双向同步（不修改两端文件）',callback:()=>this.engine.previewNative()});this.registerEvent(this.app.vault.on('rename',()=>{if(this.settings.syncOnSave&&!this.engine.isSyncing())this.engine.startSync(true);}));};
-    BaiduSyncPlugin.prototype.onunload=function(){if(this.engine?._nativeRunner)this.engine._nativeRunner.stopped=true;oldUnload.call(this);};
+    BaiduSyncPlugin.prototype.onload=async function(){await oldLoad.call(this);this.addCommand({id:'baidu-native-preview',name:'预览双向同步（不修改两端文件）',callback:()=>this.engine.previewNative()});this.registerEvent(this.app.vault.on('rename',async(file,oldPath)=>{const kind=file instanceof import_obsidian8.TFile?'file':'folder';try{await this.engine.recordRename(oldPath,file.path,kind);}catch(err){console.warn('[BaiduSync] 记录本机重命名失败',err);return;}if(this.settings.syncOnSave&&!this.engine.isSyncing()){if(this.renameSyncTimer)window.clearTimeout(this.renameSyncTimer);this.renameSyncTimer=window.setTimeout(()=>{this.renameSyncTimer=null;if(!this.engine.isSyncing())this.engine.startSync(true);},800);}}));};
+    BaiduSyncPlugin.prototype.onunload=function(){if(this.renameSyncTimer)window.clearTimeout(this.renameSyncTimer);if(this.engine?._nativeRunner)this.engine._nativeRunner.stopped=true;oldUnload.call(this);};
   }
   return {Api,Runner,plan,hash,stamp,sameRemote,normalize,relative,basePath,reserved,install};
 }
