@@ -342,12 +342,19 @@ function createNativeSync(deps) {
     }
     async applyRename(e){
       const oldLocal=await this.adapter.exists(e.oldPath),newLocal=await this.adapter.exists(e.newPath);
-      if(!oldLocal&&!newLocal){this.log('warn','本地旧路径和新路径都不存在，丢弃重命名记录：'+e.oldPath);return;}
+      if(!oldLocal&&!newLocal){this.log('warn','本地旧路径和新路径都不存在，丢弃重命名记录：'+e.oldPath);return false;}
       if(oldLocal)fail('本地旧路径仍然存在，不能确认重命名：'+e.oldPath);
       const oldRemote=await this.api.lookup(this.base+'/'+e.oldPath,this.base),newRemote=await this.api.lookup(this.base+'/'+e.newPath,this.base);
       if(oldRemote&&newRemote)fail('云端新旧路径同时存在：'+e.oldPath);
       if(!oldRemote&&newRemote){await this.rebaseAfterRename(e,newRemote);return;}
-      if(!oldRemote)fail('云端旧路径不存在：'+e.oldPath);
+      if(!oldRemote){
+        const tracked=!!this.state?.files && (e.kind==='folder'
+          ?Object.keys(this.state.files).some(p=>p.startsWith(e.oldPath.replace(/\/$/,'')+'/'))
+          :!!this.state.files[e.oldPath]);
+        if(tracked)fail('云端旧路径不存在，但本机同步基线仍记录它曾同步；请先确认云端文件是否被其他设备移走：'+e.oldPath);
+        this.log('warn','云端没有旧路径，按新建文件处理：'+e.oldPath+' → '+e.newPath);
+        return false;
+      }
       if(e.kind==='folder'&&oldRemote.isdir!==1)fail('云端旧路径不是文件夹：'+e.oldPath);
       if(e.kind==='file'&&oldRemote.isdir!==0)fail('云端旧路径不是文件：'+e.oldPath);
       const oldParent=e.oldPath.lastIndexOf('/')>0?e.oldPath.slice(0,e.oldPath.lastIndexOf('/')):'';
@@ -369,7 +376,7 @@ function createNativeSync(deps) {
       const remaining=[],renamedFolders=[];
       for(const e of entries){
         if(renamedFolders.some(f=>e.oldPath.startsWith(f.oldPath+'/')&&e.newPath===f.newPath+e.oldPath.slice(f.oldPath.length))){this.log('info','文件夹重命名已覆盖：'+e.oldPath);continue;}
-        try{await this.applyRename(e);this.log('success','云端重命名：'+e.oldPath+' → '+e.newPath);if(e.kind==='folder')renamedFolders.push(e);}
+        try{const applied=await this.applyRename(e);if(applied===false)continue;this.log('success','云端重命名：'+e.oldPath+' → '+e.newPath);if(e.kind==='folder')renamedFolders.push(e);}
         catch(err){remaining.push(e);this.log('error','重命名待处理：'+e.oldPath+' → '+e.newPath+'：'+safeError(err));}
       }
       await this.saveRenames(remaining);

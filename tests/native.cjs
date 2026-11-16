@@ -244,6 +244,18 @@ test('concurrent rename events are serialized and do not overwrite the journal',
 test('file rename journal uses the cloud rename API and rebases the baseline',async()=>{
  const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));const oldRemote={path:'A.md',remotePath:'/root/A.md',fsId:123,size:3,mtime:1,md5:'old',isdir:0};const newRemote={...oldRemote,path:'B.md',remotePath:'/root/B.md'};let moved=false;runner.api.lookup=async p=>p==='/root/A.md'?(moved?null:oldRemote):p==='/root/B.md'?(moved?newRemote:null):null;runner.api.manage=async(op,items,opts)=>{assert.equal(op,'rename');assert.equal(items[0].newname,'B.md');assert.equal(opts.allowTask,false);moved=true;return{errno:0,info:[{errno:0,path:'/root/A.md'}]}};runner.state={version:2,files:{'A.md':{local:l('A.md','oldhash'),remote:oldRemote}},uploads:{}};await runner.applyRename({oldPath:'A.md',newPath:'B.md',kind:'file'});assert(!runner.state.files['A.md']);assert.equal(runner.state.files['B.md'].remote.fsId,123);assert.equal(runner.state.files['B.md'].local.hash,'oldhash');
 });
+test('never-uploaded file rename is dropped as a new file',async()=>{
+ const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));runner.api.lookup=async()=>null;let manageCalls=0;runner.api.manage=async()=>{manageCalls++;throw Error('must not call filemanager')};
+ const applied=await runner.applyRename({oldPath:'A.md',newPath:'B.md',kind:'file'});assert.equal(applied,false);assert.equal(manageCalls,0);
+});
+test('stale rename journal of an unsynced file is cleared without aborting',async()=>{
+ const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));runner.api.lookup=async()=>null;runner.api.manage=async()=>{throw Error('must not call filemanager')};
+ await runner.saveRenames([{oldPath:'A.md',newPath:'B.md',kind:'file'}]);await runner.applyRenames();assert.equal((await runner.loadRenames()).length,0);
+});
+test('baseline-tracked rename with missing cloud old path still fails',async()=>{
+ const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));runner.api.lookup=async()=>null;runner.state.files['A.md']={local:l('A.md','oldhash'),remote:r('A.md')};
+ await assert.rejects(()=>runner.applyRename({oldPath:'A.md',newPath:'B.md',kind:'file'}),/本机同步基线/);
+});
 test('folder rename rebases all baseline paths under the old prefix',async()=>{
  const {runner,adapter,dirs}=fixture();runner.base='/root';dirs.add('B');await adapter.writeBinary('B/x.md',bytes('x'));await adapter.writeBinary('B/y.md',bytes('y'));const oldF={path:'A',remotePath:'/root/A',fsId:10,size:0,mtime:1,md5:'',isdir:1};const newF={...oldF,path:'B',remotePath:'/root/B'};let moved=false;runner.api.lookup=async p=>p==='/root/A'?(moved?null:oldF):p==='/root/B'?(moved?newF:null):null;runner.api.manage=async(op)=>{moved=true;return{errno:0,info:[{errno:0,path:'/root/A'}]}};runner.state={version:2,files:{'A/x.md':{local:l('A/x.md','x'),remote:r('A/x.md',1,'x')},'A/y.md':{local:l('A/y.md','y'),remote:r('A/y.md',2,'y')}},uploads:{}};await runner.applyRename({oldPath:'A',newPath:'B',kind:'folder'});assert(!runner.state.files['A/x.md']);assert(!runner.state.files['A/y.md']);assert.equal(runner.state.files['B/x.md'].local.path,'B/x.md');assert.equal(runner.state.files['B/y.md'].remote.fsId,2);
 });

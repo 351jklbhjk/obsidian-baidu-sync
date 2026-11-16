@@ -586,7 +586,7 @@ var require_native_sync = __commonJS({
           const oldLocal = await this.adapter.exists(e.oldPath), newLocal = await this.adapter.exists(e.newPath);
           if (!oldLocal && !newLocal) {
             this.log("warn", "\u672C\u5730\u65E7\u8DEF\u5F84\u548C\u65B0\u8DEF\u5F84\u90FD\u4E0D\u5B58\u5728\uFF0C\u4E22\u5F03\u91CD\u547D\u540D\u8BB0\u5F55\uFF1A" + e.oldPath);
-            return;
+            return false;
           }
           if (oldLocal) fail("\u672C\u5730\u65E7\u8DEF\u5F84\u4ECD\u7136\u5B58\u5728\uFF0C\u4E0D\u80FD\u786E\u8BA4\u91CD\u547D\u540D\uFF1A" + e.oldPath);
           const oldRemote = await this.api.lookup(this.base + "/" + e.oldPath, this.base), newRemote = await this.api.lookup(this.base + "/" + e.newPath, this.base);
@@ -595,7 +595,12 @@ var require_native_sync = __commonJS({
             await this.rebaseAfterRename(e, newRemote);
             return;
           }
-          if (!oldRemote) fail("\u4E91\u7AEF\u65E7\u8DEF\u5F84\u4E0D\u5B58\u5728\uFF1A" + e.oldPath);
+          if (!oldRemote) {
+            const tracked = !!this.state?.files && (e.kind === "folder" ? Object.keys(this.state.files).some((p) => p.startsWith(e.oldPath.replace(/\/$/, "") + "/")) : !!this.state.files[e.oldPath]);
+            if (tracked) fail("\u4E91\u7AEF\u65E7\u8DEF\u5F84\u4E0D\u5B58\u5728\uFF0C\u4F46\u672C\u673A\u540C\u6B65\u57FA\u7EBF\u4ECD\u8BB0\u5F55\u5B83\u66FE\u540C\u6B65\uFF1B\u8BF7\u5148\u786E\u8BA4\u4E91\u7AEF\u6587\u4EF6\u662F\u5426\u88AB\u5176\u4ED6\u8BBE\u5907\u79FB\u8D70\uFF1A" + e.oldPath);
+            this.log("warn", "\u4E91\u7AEF\u6CA1\u6709\u65E7\u8DEF\u5F84\uFF0C\u6309\u65B0\u5EFA\u6587\u4EF6\u5904\u7406\uFF1A" + e.oldPath + " \u2192 " + e.newPath);
+            return false;
+          }
           if (e.kind === "folder" && oldRemote.isdir !== 1) fail("\u4E91\u7AEF\u65E7\u8DEF\u5F84\u4E0D\u662F\u6587\u4EF6\u5939\uFF1A" + e.oldPath);
           if (e.kind === "file" && oldRemote.isdir !== 0) fail("\u4E91\u7AEF\u65E7\u8DEF\u5F84\u4E0D\u662F\u6587\u4EF6\uFF1A" + e.oldPath);
           const oldParent = e.oldPath.lastIndexOf("/") > 0 ? e.oldPath.slice(0, e.oldPath.lastIndexOf("/")) : "";
@@ -621,7 +626,8 @@ var require_native_sync = __commonJS({
               continue;
             }
             try {
-              await this.applyRename(e);
+              const applied = await this.applyRename(e);
+              if (applied === false) continue;
               this.log("success", "\u4E91\u7AEF\u91CD\u547D\u540D\uFF1A" + e.oldPath + " \u2192 " + e.newPath);
               if (e.kind === "folder") renamedFolders.push(e);
             } catch (err) {
