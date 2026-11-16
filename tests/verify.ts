@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS } from "../src/settings/settings";
 import { exportEncryptedConfig, importEncryptedConfig } from "../src/crypto/configShare";
 import { encryptData, decryptData, deriveKey, LEGACY_PBKDF2_ITERATIONS, isEncrypted } from "../src/crypto/e2ee";
 import { isWebdavSyncPath, normalizeWebdavPath, webdavPathError } from "../src/settings/syncPath";
+import { nextAutoSyncDelay, autoSyncBackoffMs } from "../src/sync/autoSync";
 
 function testMD5() {
   console.log("-> Testing MD5...");
@@ -72,6 +73,32 @@ function testSyncPath() {
   assert.ok(webdavPathError("/WebDAV/")?.includes("下一级"));
   assert.strictEqual(webdavPathError("/WebDAV/Obsidian"), null);
   console.log("   WebDAV sync path tests passed!");
+}
+
+function testAutoSyncTiming() {
+  console.log("-> Testing auto-sync timing...");
+  const now = 1_000_000;
+  assert.strictEqual(
+    nextAutoSyncDelay({ now, debounceMs: 15000, minIntervalMs: 120000, lastAutoSyncAt: 0, backoffUntil: 0 }),
+    15000,
+    "fresh auto-sync should wait for the 15s debounce"
+  );
+  assert.strictEqual(
+    nextAutoSyncDelay({ now, debounceMs: 15000, minIntervalMs: 120000, lastAutoSyncAt: now - 30000, backoffUntil: 0 }),
+    90000,
+    "min interval should win over debounce"
+  );
+  assert.strictEqual(
+    nextAutoSyncDelay({ now, debounceMs: 15000, minIntervalMs: 120000, lastAutoSyncAt: now - 120000, backoffUntil: now + 60000 }),
+    60000,
+    "backoff should win over both"
+  );
+  assert.strictEqual(autoSyncBackoffMs(1), 60000);
+  assert.strictEqual(autoSyncBackoffMs(2), 120000);
+  assert.strictEqual(autoSyncBackoffMs(3), 240000);
+  assert.strictEqual(autoSyncBackoffMs(4), 300000);
+  assert.strictEqual(autoSyncBackoffMs(9), 300000);
+  console.log("   Auto-sync timing tests passed!");
 }
 
 function testPlannerLWW() {
@@ -342,6 +369,7 @@ async function runAll() {
   testMD5();
   testFilter();
   testSyncPath();
+  testAutoSyncTiming();
   testPlannerLWW();
   await testConfigShare();
   await testE2EEFallback();

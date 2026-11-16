@@ -46,6 +46,7 @@ var require_native_sync = __commonJS({
         throw new Error(message);
       };
       const safeError = (e) => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, "$1=[redacted]");
+      const isLocalChangeError = (e) => /本地文件(在扫描后变化|正在变化)|上传前本地文件变化|本地原文已变化/.test(safeError(e));
       const hash = async (b) => Array.from(new Uint8Array(await crypto2().subtle.digest("SHA-256", b)), (n) => n.toString(16).padStart(2, "0")).join("");
       const basePath = (p, validate = () => null) => {
         if (typeof p !== "string" || !p.startsWith("/") || p.includes("\\") || hasControl(p)) fail("\u65E0\u6548\u4E91\u7AEF\u6839\u76EE\u5F55");
@@ -97,7 +98,10 @@ var require_native_sync = __commonJS({
             try {
               data = response.json;
             } catch {
-              fail("API \u54CD\u5E94\u4E0D\u662F JSON");
+              last = new Error("API \u54CD\u5E94\u4E0D\u662F JSON");
+              if (options.noRetry) throw last;
+              await this.pause(1e3 * 2 ** attempt);
+              continue;
             }
             const errno = data?.errno ?? data?.error_code;
             if (response.status === 200 && errno === 0) return data;
@@ -794,7 +798,7 @@ var require_native_sync = __commonJS({
           if (this.stopped) return { success: false, stopped: true };
           if (e.isSyncing()) return { success: false, busy: true };
           e.setState("preparing", "\u540C\u6B65\u51C6\u5907");
-          const stats = { uploaded: 0, downloaded: 0, deleted: 0, adopted: 0, errors: 0, pending: 0, conflicts: 0 };
+          const stats = { uploaded: 0, downloaded: 0, deleted: 0, adopted: 0, errors: 0, pending: 0, conflicts: 0, deferred: 0 };
           try {
             await this.load(e.getSettings());
             this.runId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
@@ -883,6 +887,11 @@ var require_native_sync = __commonJS({
                 else if (x.action === "DOWNLOAD") stats.downloaded++;
                 else if (x.action.startsWith("DELETE_")) stats.deleted++;
               } catch (err) {
+                if (isLocalChangeError(err)) {
+                  stats.deferred++;
+                  this.log("warn", "\u6587\u4EF6\u4ECD\u5728\u53D8\u5316\uFF0C\u672C\u8F6E\u8DF3\u8FC7\uFF1A" + x.path);
+                  continue;
+                }
                 stats.errors++;
                 this.log("error", x.path + "\uFF1A" + safeError(err));
                 break;
@@ -895,9 +904,10 @@ var require_native_sync = __commonJS({
             }
             const conflictText = stats.conflicts ? `\uFF0C${stats.conflicts} \u9879\u51B2\u7A81\u5F85\u5904\u7406` : "";
             const adoptedText = stats.adopted ? `\u4E00\u81F4 ${stats.adopted}\uFF0C` : "";
-            const summary = stats.errors ? `\u540C\u6B65\u4E2D\u65AD\uFF1A\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58\uFF0C\u5931\u8D25 ${stats.errors} \u9879` : stats.pending ? `\u540C\u6B65\u5B8C\u6210\uFF1A${stats.pending} \u9879\u5220\u9664\u5F85\u786E\u8BA4${conflictText}` : `\u540C\u6B65\u5B8C\u6210\uFF1A${adoptedText}\u4E0A\u4F20 ${stats.uploaded}\uFF0C\u4E0B\u8F7D ${stats.downloaded}\uFF0C\u5220\u9664 ${stats.deleted}${conflictText}`;
-            this.log(stats.errors ? "error" : stats.pending ? "warn" : "success", summary);
-            e.setState(stats.errors ? "error" : "idle", stats.errors ? "\u540C\u6B65\u4E2D\u65AD\uFF0C\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58" : stats.pending ? `${stats.pending} \u9879\u5220\u9664\u5F85\u5BA1\u9605` : stats.conflicts ? `${stats.conflicts} \u9879\u51B2\u7A81\u5F85\u5904\u7406` : "\u540C\u6B65\u5B8C\u6210");
+            const deferredText = stats.deferred ? `\uFF0C${stats.deferred} \u9879\u6587\u4EF6\u4ECD\u5728\u53D8\u5316\uFF0C\u7A0D\u540E\u91CD\u8BD5` : "";
+            const summary = stats.errors ? `\u540C\u6B65\u4E2D\u65AD\uFF1A\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58\uFF0C\u5931\u8D25 ${stats.errors} \u9879` : stats.pending ? `\u540C\u6B65\u5B8C\u6210\uFF1A${stats.pending} \u9879\u5220\u9664\u5F85\u786E\u8BA4${deferredText}${conflictText}` : `\u540C\u6B65\u5B8C\u6210\uFF1A${adoptedText}\u4E0A\u4F20 ${stats.uploaded}\uFF0C\u4E0B\u8F7D ${stats.downloaded}\uFF0C\u5220\u9664 ${stats.deleted}${deferredText}${conflictText}`;
+            this.log(stats.errors ? "error" : stats.pending || stats.deferred ? "warn" : "success", summary);
+            e.setState(stats.errors ? "error" : "idle", stats.errors ? "\u540C\u6B65\u4E2D\u65AD\uFF0C\u6210\u529F\u9879\u76EE\u5DF2\u4FDD\u5B58" : stats.pending ? `${stats.pending} \u9879\u5220\u9664\u5F85\u5BA1\u9605` : stats.deferred ? `${stats.deferred} \u9879\u6587\u4EF6\u4ECD\u5728\u53D8\u5316\uFF0C\u7A0D\u540E\u91CD\u8BD5` : stats.conflicts ? `${stats.conflicts} \u9879\u51B2\u7A81\u5F85\u5904\u7406` : "\u540C\u6B65\u5B8C\u6210");
             return { success: stats.errors === 0 && stats.pending === 0 && stats.conflicts === 0, stats };
           } catch (err) {
             this.log("error", safeError(err));
@@ -976,11 +986,14 @@ var require_native_sync = __commonJS({
               return;
             }
             if (this.settings.syncOnSave && !this.engine.isSyncing()) {
-              if (this.renameSyncTimer) window.clearTimeout(this.renameSyncTimer);
-              this.renameSyncTimer = window.setTimeout(() => {
-                this.renameSyncTimer = null;
-                if (!this.engine.isSyncing()) this.engine.startSync(true);
-              }, 800);
+              if (typeof this.scheduleAutoSync === "function") this.scheduleAutoSync();
+              else {
+                if (this.renameSyncTimer) window.clearTimeout(this.renameSyncTimer);
+                this.renameSyncTimer = window.setTimeout(() => {
+                  this.renameSyncTimer = null;
+                  if (!this.engine.isSyncing()) this.engine.startSync(true);
+                }, 800);
+              }
             }
           }));
         };
@@ -1019,7 +1032,8 @@ var DEFAULT_SETTINGS = {
   syncOnStartup: true,
   syncIntervalMinutes: 10,
   syncOnSave: false,
-  syncDebounceSeconds: 5,
+  syncDebounceSeconds: 15,
+  syncMinIntervalSeconds: 120,
   ribbonAction: "openLog",
   syncObsidianConfig: true,
   syncPlugins: true,
@@ -1660,9 +1674,23 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.resetInterval();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u4FDD\u5B58/\u4FEE\u6539\u540E\u9632\u6296\u81EA\u52A8\u540C\u6B65").setDesc("\u6587\u4EF6\u4FDD\u5B58\u6216\u7F16\u8F91\u505C\u6B62\u4E00\u6BB5\u65F6\u95F4\u540E\u81EA\u52A8\u89E6\u53D1\u540C\u6B65").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("\u4FDD\u5B58/\u4FEE\u6539\u540E\u9632\u6296\u81EA\u52A8\u540C\u6B65").setDesc("\u6587\u4EF6\u4FDD\u5B58\u6216\u7F16\u8F91\u505C\u6B62\u4E00\u6BB5\u65F6\u95F4\u540E\u81EA\u52A8\u89E6\u53D1\u540C\u6B65\uFF1B\u7B49\u5F85\u65F6\u95F4\u89C1\u4E0B\u65B9").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncOnSave).onChange(async (val) => {
         this.plugin.settings.syncOnSave = val;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("\u505C\u6B62\u7F16\u8F91\u540E\u7B49\u5F85 (\u79D2)").setDesc("\u6700\u540E\u4E00\u6B21\u6587\u4EF6\u4FEE\u6539\u540E\u7B49\u5F85\u591A\u4E45\u518D\u81EA\u52A8\u540C\u6B65\uFF0C\u907F\u514D\u8FB9\u5199\u8FB9\u540C\u6B65").addText(
+      (text) => text.setPlaceholder("15").setValue(String(this.plugin.settings.syncDebounceSeconds)).onChange(async (val) => {
+        const num = parseInt(val, 10);
+        this.plugin.settings.syncDebounceSeconds = isNaN(num) ? 15 : Math.min(300, Math.max(1, num));
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65\u6700\u5C0F\u95F4\u9694 (\u79D2)").setDesc("\u4E24\u6B21\u81EA\u52A8\u540C\u6B65\u4E4B\u95F4\u81F3\u5C11\u7B49\u5F85\u8FD9\u4E48\u4E45\uFF1B\u8BBE\u4E3A 0 \u4E0D\u9650\u5236").addText(
+      (text) => text.setPlaceholder("120").setValue(String(this.plugin.settings.syncMinIntervalSeconds)).onChange(async (val) => {
+        const num = parseInt(val, 10);
+        this.plugin.settings.syncMinIntervalSeconds = isNaN(num) ? 120 : Math.min(3600, Math.max(0, num));
         await this.plugin.saveSettings();
       })
     );
@@ -3129,6 +3157,23 @@ var SyncLogModal = class extends import_obsidian7.Modal {
   }
 };
 
+// src/sync/autoSync.ts
+function nextAutoSyncDelay(timing) {
+  const debounce = Math.max(0, timing.debounceMs || 0);
+  const minInterval = Math.max(0, timing.minIntervalMs || 0);
+  const backoffUntil = Math.max(0, timing.backoffUntil || 0);
+  const earliest = Math.max(
+    timing.now + debounce,
+    timing.lastAutoSyncAt + minInterval,
+    backoffUntil
+  );
+  return Math.max(0, earliest - timing.now);
+}
+function autoSyncBackoffMs(failureCount) {
+  const count = Math.max(1, Math.min(4, Math.floor(failureCount || 1)));
+  return Math.min(3e5, 6e4 * 2 ** (count - 1));
+}
+
 // src/main.ts
 var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
   constructor() {
@@ -3139,6 +3184,10 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
     this.startupTimer = null;
     this.setupTimer = null;
     this.startupGraceUntil = 0;
+    this.lastAutoSyncAt = 0;
+    this.autoSyncPending = false;
+    this.autoSyncBackoffUntil = 0;
+    this.autoSyncFailureCount = 0;
     this.ribbonIconEl = null;
   }
   async onload() {
@@ -3187,6 +3236,10 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
         } else {
           this.ribbonIconEl.removeClass("baidu-sync-spinning");
         }
+      }
+      if ((state === "idle" || state === "error") && this.autoSyncPending) {
+        this.autoSyncPending = false;
+        this.scheduleAutoSync();
       }
     });
     this.addCommand({
@@ -3238,12 +3291,18 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
   async loadSettings() {
     const raw = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, raw || {});
+    let migrated = false;
+    if (raw && raw.syncDebounceSeconds === 5) {
+      this.settings.syncDebounceSeconds = 15;
+      migrated = true;
+    }
     const validPath = isWebdavSyncPath(this.settings.remoteBasePath);
     if (raw && raw.onboardingComplete === void 0 && validPath) {
       this.settings.onboardingComplete = true;
     } else if (!validPath) {
       this.settings.onboardingComplete = false;
     }
+    if (migrated) await this.saveSettings();
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -3258,7 +3317,7 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       const ms = this.settings.syncIntervalMinutes * 60 * 1e3;
       this.intervalId = window.setInterval(async () => {
         if (this.settings.accessToken) {
-          await this.engine.startSync(true);
+          await this.runAutoSync();
         }
       }, ms);
     }
@@ -3276,27 +3335,85 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       }
       this.engine.addLog("info", "\u542F\u52A8\u81EA\u52A8\u540C\u6B65\u5DF2\u5B89\u6392\uFF0C\u5C06\u4E8E 3 \u79D2\u540E\u6267\u884C");
       this.startupTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
+        await this.runAutoSync();
       }, 3e3);
     }
     this.resetInterval();
     const onVaultChange = (file) => {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
       if (Date.now() < this.startupGraceUntil) return;
-      if (this.engine.isSyncing()) return;
-      if (file.path.includes("sync_manifest.json") || file.path.includes("native-state.json") || file.path.includes("native-plan.json") || file.path.includes("native-renames.json") || file.path.includes("/baidu-sync/") || file.path.includes("workspace"))
+      if (file.path.includes("baidu-netdisk-sync") || file.path.includes("sync_manifest.json") || file.path.includes("native-state.json") || file.path.includes("native-plan.json") || file.path.includes("native-renames.json") || file.path.includes("/baidu-sync/") || file.path.includes("workspace"))
         return;
-      if (this.saveDebounceTimer !== null) {
-        window.clearTimeout(this.saveDebounceTimer);
+      if (this.engine.isSyncing()) {
+        if (this.app.workspace.getActiveFile()?.path === file.path) {
+          this.autoSyncPending = true;
+        }
+        return;
       }
-      const debounceMs = (this.settings.syncDebounceSeconds || 5) * 1e3;
-      this.saveDebounceTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
-      }, debounceMs);
+      this.scheduleAutoSync();
     };
     this.registerEvent(this.app.vault.on("modify", onVaultChange));
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
+  }
+  scheduleAutoSync() {
+    if (this.needsSyncPathSetup() || !this.settings.accessToken) return;
+    if (this.engine.isSyncing()) {
+      this.autoSyncPending = true;
+      return;
+    }
+    if (this.saveDebounceTimer !== null) {
+      window.clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
+    }
+    const now = Date.now();
+    const wait = nextAutoSyncDelay({
+      now,
+      debounceMs: Math.max(1, this.settings.syncDebounceSeconds || 15) * 1e3,
+      minIntervalMs: Math.max(0, this.settings.syncMinIntervalSeconds || 0) * 1e3,
+      lastAutoSyncAt: this.lastAutoSyncAt,
+      backoffUntil: this.autoSyncBackoffUntil
+    });
+    this.saveDebounceTimer = window.setTimeout(() => {
+      this.saveDebounceTimer = null;
+      void this.runAutoSync();
+    }, wait);
+  }
+  async runAutoSync() {
+    if (this.needsSyncPathSetup() || !this.settings.accessToken) return;
+    if (this.engine.isSyncing()) {
+      this.autoSyncPending = true;
+      return;
+    }
+    if (Date.now() < this.autoSyncBackoffUntil) {
+      this.scheduleAutoSync();
+      return;
+    }
+    this.autoSyncPending = false;
+    const startedAt = Date.now();
+    const res = await this.engine.startSync(true);
+    if (res?.setupRequired || res?.busy) {
+      this.autoSyncPending = true;
+      return;
+    }
+    this.lastAutoSyncAt = startedAt;
+    if (res?.success) {
+      this.autoSyncFailureCount = 0;
+      this.autoSyncBackoffUntil = 0;
+    } else if (res?.error || (res?.stats?.errors || 0) > 0) {
+      this.autoSyncFailureCount++;
+      const backoff = autoSyncBackoffMs(this.autoSyncFailureCount);
+      this.autoSyncBackoffUntil = Date.now() + backoff;
+      this.engine.addLog("warn", `\u81EA\u52A8\u540C\u6B65\u5931\u8D25\uFF0C${Math.round(backoff / 1e3)} \u79D2\u5185\u4E0D\u518D\u81EA\u52A8\u91CD\u8BD5`);
+    } else {
+      this.autoSyncFailureCount = 0;
+      this.autoSyncBackoffUntil = 0;
+    }
+    if ((res?.stats?.deferred || 0) > 0) this.scheduleAutoSync();
+    if (this.autoSyncPending) {
+      this.autoSyncPending = false;
+      this.scheduleAutoSync();
+    }
   }
   needsSyncPathSetup() {
     return !this.settings.onboardingComplete || !isWebdavSyncPath(this.settings.remoteBasePath);
@@ -3306,6 +3423,10 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       new import_obsidian8.Notice("\u540C\u6B65\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u5019");
       return;
     }
+    if (this.saveDebounceTimer !== null) {
+      window.clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
+    }
     new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
     const res = await this.engine.startSync(false);
     if (this.engine.isSyncing() || res.busy) {
@@ -3314,7 +3435,12 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
     }
     if (res.setupRequired || res.cancelled) return;
     if (res.success) {
-      new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
+      this.autoSyncFailureCount = 0;
+      this.autoSyncBackoffUntil = 0;
+      new import_obsidian8.Notice(
+        (res.stats?.deferred || 0) > 0 ? "\u540C\u6B65\u5B8C\u6210\uFF0C\u4F46\u90E8\u5206\u6587\u4EF6\u4ECD\u5728\u53D8\u5316\uFF0C\u7A0D\u540E\u4F1A\u81EA\u52A8\u91CD\u8BD5" : "\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01"
+      );
+      if ((res.stats?.deferred || 0) > 0) this.scheduleAutoSync();
     } else {
       new import_obsidian8.Notice("\u540C\u6B65\u672A\u5B8C\u6210\uFF0C\u8BF7\u67E5\u770B\u540C\u6B65\u65E5\u5FD7");
     }

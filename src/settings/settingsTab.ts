@@ -287,12 +287,40 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("保存/修改后防抖自动同步")
-      .setDesc("文件保存或编辑停止一段时间后自动触发同步")
+      .setDesc("文件保存或编辑停止一段时间后自动触发同步；等待时间见下方")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.syncOnSave)
           .onChange(async (val) => {
             this.plugin.settings.syncOnSave = val;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("停止编辑后等待 (秒)")
+      .setDesc("最后一次文件修改后等待多久再自动同步，避免边写边同步")
+      .addText((text) =>
+        text
+          .setPlaceholder("15")
+          .setValue(String(this.plugin.settings.syncDebounceSeconds))
+          .onChange(async (val) => {
+            const num = parseInt(val, 10);
+            this.plugin.settings.syncDebounceSeconds = isNaN(num) ? 15 : Math.min(300, Math.max(1, num));
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("自动同步最小间隔 (秒)")
+      .setDesc("两次自动同步之间至少等待这么久；设为 0 不限制")
+      .addText((text) =>
+        text
+          .setPlaceholder("120")
+          .setValue(String(this.plugin.settings.syncMinIntervalSeconds))
+          .onChange(async (val) => {
+            const num = parseInt(val, 10);
+            this.plugin.settings.syncMinIntervalSeconds = isNaN(num) ? 120 : Math.min(3600, Math.max(0, num));
             await this.plugin.saveSettings();
           })
       );

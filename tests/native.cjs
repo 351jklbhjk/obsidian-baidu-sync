@@ -74,6 +74,12 @@ test('token refresh rebuilds the actual request URL',async()=>{
  const api=new C.Api({refreshTokenIfNeeded:async force=>{if(force)token='new';return token;}},async()=>{});
  assert.equal((await api.request('https://pan.baidu.com/rest/2.0/xpan/file',{method:'list'})).value,1);assert.deepEqual(tokens,['old','new']);
 });
+test('non-JSON API response is retried as a transient error',async()=>{
+ let calls=0;
+ const C=createNativeSync({...deps,schedule:fn=>fn(),requestUrl:async()=>{calls++;if(calls===1)return{status:200,get json(){throw Error('html')}};return{status:200,json:{errno:0,value:1}};}});
+ const api=new C.Api({refreshTokenIfNeeded:async()=> 'token'});
+ assert.equal((await api.request('https://pan.baidu.com/rest/2.0/xpan/nas',{method:'uinfo'})).value,1);assert.equal(calls,2);
+});
 test('HTTP 200 filemanager partial failure and asynchronous task are not success',async()=>{
  const api=new N.Api({},async()=>{});
  for(const d of [{errno:0,info:[{path:'/a',errno:1}]},{errno:0,taskid:123},{errno:0,info:[]}]){api.request=async()=>d;await assert.rejects(()=>api.manage('delete',['/a']));}
@@ -156,6 +162,12 @@ test('automatic run holds deletes, manual approved run uses trash',async()=>{
 });
 test('error stops subsequent actions and does not claim complete',async()=>{
  const {runner}=fixture();runner.load=async()=>{};runner.scan=async()=>[{action:'UPLOAD',path:'a'},{action:'UPLOAD',path:'b'}];let called=0;runner.execute=async()=>{called++;throw Error('disk full')};const result=await runner.run({silent:true});assert.equal(called,1);assert.equal(result.success,false);assert.equal(result.stats.errors,1);
+});
+test('local change during transfer defers one file and continues others',async()=>{
+ const {runner}=fixture();runner.load=async()=>{};runner.scan=async()=>[{action:'UPLOAD',path:'a.md'},{action:'UPLOAD',path:'b.md'}];const done=[];
+ runner.execute=async x=>{if(x.path==='a.md')throw Error('本地文件在扫描后变化：a.md');done.push(x.path);};
+ const result=await runner.run({silent:true});
+ assert.deepEqual(done,['b.md']);assert.equal(result.stats.deferred,1);assert.equal(result.stats.errors,0);assert.equal(result.success,true);
 });
 test('zero plan does not open an empty manual review modal',async()=>{
  const {runner}=fixture();runner.load=async()=>{};runner.scan=async()=>[];let called=0;runner.confirm=async()=>{called++;return true;};const result=await runner.run({confirm:true});assert(result.success);assert.equal(called,0);

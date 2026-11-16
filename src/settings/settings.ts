@@ -12,6 +12,7 @@ export interface BaiduSyncSettings {
   syncIntervalMinutes: number; // 0 disables periodic sync
   syncOnSave: boolean;
   syncDebounceSeconds: number;
+  syncMinIntervalSeconds: number;
   ribbonAction: "openLog" | "syncNow";
 
   // Sync Scope
@@ -43,7 +44,8 @@ export const DEFAULT_SETTINGS: BaiduSyncSettings = {
   syncOnStartup: true,
   syncIntervalMinutes: 10,
   syncOnSave: false,
-  syncDebounceSeconds: 5,
+  syncDebounceSeconds: 15,
+  syncMinIntervalSeconds: 120,
   ribbonAction: "openLog",
 
   syncObsidianConfig: true,

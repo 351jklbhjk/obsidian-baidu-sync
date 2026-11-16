@@ -7,6 +7,7 @@ function createNativeSync(deps) {
   const hasControl = s => Array.from(String(s)).some(ch => ch.charCodeAt(0) < 32);
   const fail = message => { throw new Error(message); };
   const safeError = e => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, '$1=[redacted]');
+  const isLocalChangeError = e => /本地文件(在扫描后变化|正在变化)|上传前本地文件变化|本地原文已变化/.test(safeError(e));
   const hash = async b => Array.from(new Uint8Array(await crypto().subtle.digest('SHA-256', b)), n => n.toString(16).padStart(2,'0')).join('');
   const basePath = (p, validate = () => null) => {
     if (typeof p !== 'string' || !p.startsWith('/') || p.includes('\\') || hasControl(p)) fail('无效云端根目录');
@@ -46,7 +47,7 @@ function createNativeSync(deps) {
         try {
           response=await requestUrl({url:url.toString(),method:form?'POST':'GET',headers:{'User-Agent':'pan.baidu.com',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),throw:false});
         } catch { last=new Error('网络请求失败'); if(options.noRetry) throw last; await this.pause(1000*2**attempt);continue; }
-        let data; try { data=response.json; } catch { fail('API 响应不是 JSON'); }
+        let data; try { data=response.json; } catch { last=new Error('API 响应不是 JSON'); if(options.noRetry) throw last; await this.pause(1000*2**attempt); continue; }
         const errno=data?.errno ?? data?.error_code;
         if(response.status===200 && errno===0) return data;
         last=Object.assign(new Error(`百度 API ${query.method}: HTTP ${response.status}, code ${errno}`),{errno,status:response.status});
@@ -466,7 +467,7 @@ function createNativeSync(deps) {
     }
     async run({preview=false,confirm=false,silent=false,trigger=''}={}) {
       const e=this.e;if(this.stopped)return {success:false,stopped:true};if(e.isSyncing())return {success:false,busy:true};
-      e.setState('preparing','同步准备');const stats={uploaded:0,downloaded:0,deleted:0,adopted:0,errors:0,pending:0,conflicts:0};
+      e.setState('preparing','同步准备');const stats={uploaded:0,downloaded:0,deleted:0,adopted:0,errors:0,pending:0,conflicts:0,deferred:0};
       try {
         await this.load(e.getSettings());this.runId=Date.now()+'-'+Math.random().toString(36).slice(2,8);
         this.log('info','同步目录：'+this.base);
@@ -505,14 +506,18 @@ function createNativeSync(deps) {
           if(x.action==='ADOPT')continue;
           if(x.action.startsWith('DELETE_') && !confirm){stats.pending++;this.log('warn','删除待手动确认：'+x.path);continue;}
           try {await this.execute(x);this.log('success',itemLabel(x)+'：'+x.path);if(x.action==='UPLOAD')stats.uploaded++;else if(x.action==='DOWNLOAD')stats.downloaded++;else if(x.action.startsWith('DELETE_'))stats.deleted++;}
-          catch(err){stats.errors++;this.log('error',x.path+'：'+safeError(err));break;}
+          catch(err){
+            if(isLocalChangeError(err)){stats.deferred++;this.log('warn','文件仍在变化，本轮跳过：'+x.path);continue;}
+            stats.errors++;this.log('error',x.path+'：'+safeError(err));break;
+          }
         }
         if(!stats.errors){this.state.adopted=true;this.state.lastSync=Date.now();await this.persist();}
         const conflictText=stats.conflicts?`，${stats.conflicts} 项冲突待处理`:'';
         const adoptedText=stats.adopted?`一致 ${stats.adopted}，`:'';
-        const summary=stats.errors?`同步中断：成功项目已保存，失败 ${stats.errors} 项`:stats.pending?`同步完成：${stats.pending} 项删除待确认${conflictText}`:`同步完成：${adoptedText}上传 ${stats.uploaded}，下载 ${stats.downloaded}，删除 ${stats.deleted}${conflictText}`;
-        this.log(stats.errors?'error':stats.pending?'warn':'success',summary);
-        e.setState(stats.errors?'error':'idle',stats.errors?'同步中断，成功项目已保存':stats.pending?`${stats.pending} 项删除待审阅`:(stats.conflicts?`${stats.conflicts} 项冲突待处理`:'同步完成'));
+        const deferredText=stats.deferred?`，${stats.deferred} 项文件仍在变化，稍后重试`:'';
+        const summary=stats.errors?`同步中断：成功项目已保存，失败 ${stats.errors} 项`:stats.pending?`同步完成：${stats.pending} 项删除待确认${deferredText}${conflictText}`:`同步完成：${adoptedText}上传 ${stats.uploaded}，下载 ${stats.downloaded}，删除 ${stats.deleted}${deferredText}${conflictText}`;
+        this.log(stats.errors?'error':(stats.pending||stats.deferred)?'warn':'success',summary);
+        e.setState(stats.errors?'error':'idle',stats.errors?'同步中断，成功项目已保存':stats.pending?`${stats.pending} 项删除待审阅`:(stats.deferred?`${stats.deferred} 项文件仍在变化，稍后重试`:(stats.conflicts?`${stats.conflicts} 项冲突待处理`:'同步完成')));
         return {success:stats.errors===0 && stats.pending===0 && stats.conflicts===0,stats};
       }catch(err){this.log('error',safeError(err));e.setState('error',safeError(err));return {success:false,error:safeError(err),stats:{...stats,errors:stats.errors+1}};}
     }
@@ -544,7 +549,7 @@ function createNativeSync(deps) {
     SyncEngine.prototype.convertVaultToPlaintext=async function(){throw new Error('请先完成同步，再单独规划加密迁移；本版本不执行旧版全量覆盖迁移');};
     SyncEngine.prototype.recordRename=function(oldPath,newPath,kind){return this.nativeRunner().recordRename(oldPath,newPath,kind);};
     const oldLoad=BaiduSyncPlugin.prototype.onload,oldUnload=BaiduSyncPlugin.prototype.onunload;
-    BaiduSyncPlugin.prototype.onload=async function(){await oldLoad.call(this);this.addCommand({id:'baidu-native-preview',name:'预览双向同步（不修改两端文件）',callback:()=>this.engine.previewNative()});this.registerEvent(this.app.vault.on('rename',async(file,oldPath)=>{const kind=file instanceof TFile?'file':'folder';try{await this.engine.recordRename(oldPath,file.path,kind);}catch(err){console.warn('[BaiduSync] 记录本机重命名失败',err);return;}if(this.settings.syncOnSave&&!this.engine.isSyncing()){if(this.renameSyncTimer)window.clearTimeout(this.renameSyncTimer);this.renameSyncTimer=window.setTimeout(()=>{this.renameSyncTimer=null;if(!this.engine.isSyncing())this.engine.startSync(true);},800);}}));};
+    BaiduSyncPlugin.prototype.onload=async function(){await oldLoad.call(this);this.addCommand({id:'baidu-native-preview',name:'预览双向同步（不修改两端文件）',callback:()=>this.engine.previewNative()});this.registerEvent(this.app.vault.on('rename',async(file,oldPath)=>{const kind=file instanceof TFile?'file':'folder';try{await this.engine.recordRename(oldPath,file.path,kind);}catch(err){console.warn('[BaiduSync] 记录本机重命名失败',err);return;}if(this.settings.syncOnSave&&!this.engine.isSyncing()){if(typeof this.scheduleAutoSync==='function')this.scheduleAutoSync();else{if(this.renameSyncTimer)window.clearTimeout(this.renameSyncTimer);this.renameSyncTimer=window.setTimeout(()=>{this.renameSyncTimer=null;if(!this.engine.isSyncing())this.engine.startSync(true);},800);}}}));};
     BaiduSyncPlugin.prototype.onunload=function(){if(this.renameSyncTimer)window.clearTimeout(this.renameSyncTimer);if(this.engine?._nativeRunner)this.engine._nativeRunner.stopped=true;oldUnload.call(this);};
   }
   return {Api,Runner,plan,hash,stamp,sameRemote,normalize,relative,basePath,reserved,install};

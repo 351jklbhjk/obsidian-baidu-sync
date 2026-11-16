@@ -9,6 +9,7 @@ import { StatusBarManager } from "./ui/statusBar";
 import { SyncLogModal } from "./ui/logModal";
 import { SyncPathSetupModal } from "./ui/syncPathSetupModal";
 import { isWebdavSyncPath } from "./settings/syncPath";
+import { autoSyncBackoffMs, nextAutoSyncDelay } from "./sync/autoSync";
 
 export default class BaiduSyncPlugin extends Plugin {
   settings: BaiduSyncSettings = DEFAULT_SETTINGS;
@@ -23,6 +24,10 @@ export default class BaiduSyncPlugin extends Plugin {
   private startupTimer: number | null = null;
   private setupTimer: number | null = null;
   private startupGraceUntil = 0;
+  private lastAutoSyncAt = 0;
+  private autoSyncPending = false;
+  private autoSyncBackoffUntil = 0;
+  private autoSyncFailureCount = 0;
   private ribbonIconEl: HTMLElement | null = null;
 
   async onload(): Promise<void> {
@@ -81,6 +86,10 @@ export default class BaiduSyncPlugin extends Plugin {
         } else {
           this.ribbonIconEl.removeClass("baidu-sync-spinning");
         }
+      }
+      if ((state === "idle" || state === "error") && this.autoSyncPending) {
+        this.autoSyncPending = false;
+        this.scheduleAutoSync();
       }
     });
 
@@ -143,12 +152,19 @@ export default class BaiduSyncPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const raw = (await this.loadData()) as Partial<BaiduSyncSettings> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, raw || {});
+    let migrated = false;
+    // 5s was the old hidden default; the setting is now exposed as 15s.
+    if (raw && raw.syncDebounceSeconds === 5) {
+      this.settings.syncDebounceSeconds = 15;
+      migrated = true;
+    }
     const validPath = isWebdavSyncPath(this.settings.remoteBasePath);
     if (raw && raw.onboardingComplete === undefined && validPath) {
       this.settings.onboardingComplete = true;
     } else if (!validPath) {
       this.settings.onboardingComplete = false;
     }
+    if (migrated) await this.saveSettings();
   }
 
   async saveSettings(): Promise<void> {
@@ -166,7 +182,7 @@ export default class BaiduSyncPlugin extends Plugin {
       const ms = this.settings.syncIntervalMinutes * 60 * 1000;
       this.intervalId = window.setInterval(async () => {
         if (this.settings.accessToken) {
-          await this.engine.startSync(true); // Silent sync
+          await this.runAutoSync(); // Silent sync
         }
       }, ms);
     }
@@ -187,7 +203,7 @@ export default class BaiduSyncPlugin extends Plugin {
       this.engine.addLog("info", "启动自动同步已安排，将于 3 秒后执行");
       // Delay 3s to let Obsidian complete internal indexing
       this.startupTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
+        await this.runAutoSync();
       }, 3000);
     }
 
@@ -198,8 +214,8 @@ export default class BaiduSyncPlugin extends Plugin {
     const onVaultChange = (file: TAbstractFile) => {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
       if (Date.now() < this.startupGraceUntil) return;
-      if (this.engine.isSyncing()) return;
       if (
+        file.path.includes("baidu-netdisk-sync") ||
         file.path.includes("sync_manifest.json") ||
         file.path.includes("native-state.json") ||
         file.path.includes("native-plan.json") ||
@@ -208,20 +224,90 @@ export default class BaiduSyncPlugin extends Plugin {
         file.path.includes("workspace")
       )
         return;
-
-      if (this.saveDebounceTimer !== null) {
-        window.clearTimeout(this.saveDebounceTimer);
+      if (this.engine.isSyncing()) {
+        // Ignore files written by the sync engine; only remember edits to the
+        // note the user is currently working in.
+        if (this.app.workspace.getActiveFile()?.path === file.path) {
+          this.autoSyncPending = true;
+        }
+        return;
       }
 
-      const debounceMs = (this.settings.syncDebounceSeconds || 5) * 1000;
-      this.saveDebounceTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
-      }, debounceMs);
+      this.scheduleAutoSync();
     };
 
     this.registerEvent(this.app.vault.on("modify", onVaultChange));
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
+  }
+
+  scheduleAutoSync(): void {
+    if (this.needsSyncPathSetup() || !this.settings.accessToken) return;
+    if (this.engine.isSyncing()) {
+      this.autoSyncPending = true;
+      return;
+    }
+    if (this.saveDebounceTimer !== null) {
+      window.clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
+    }
+    const now = Date.now();
+    const wait = nextAutoSyncDelay({
+      now,
+      debounceMs: Math.max(1, this.settings.syncDebounceSeconds || 15) * 1000,
+      minIntervalMs: Math.max(0, this.settings.syncMinIntervalSeconds || 0) * 1000,
+      lastAutoSyncAt: this.lastAutoSyncAt,
+      backoffUntil: this.autoSyncBackoffUntil,
+    });
+    this.saveDebounceTimer = window.setTimeout(() => {
+      this.saveDebounceTimer = null;
+      void this.runAutoSync();
+    }, wait);
+  }
+
+  private async runAutoSync(): Promise<void> {
+    if (this.needsSyncPathSetup() || !this.settings.accessToken) return;
+    if (this.engine.isSyncing()) {
+      this.autoSyncPending = true;
+      return;
+    }
+    if (Date.now() < this.autoSyncBackoffUntil) {
+      this.scheduleAutoSync();
+      return;
+    }
+
+    this.autoSyncPending = false;
+    const startedAt = Date.now();
+    const res = (await this.engine.startSync(true)) as {
+      success?: boolean;
+      error?: string;
+      busy?: boolean;
+      setupRequired?: boolean;
+      stats?: { errors?: number; deferred?: number };
+    };
+    if (res?.setupRequired || res?.busy) {
+      this.autoSyncPending = true;
+      return;
+    }
+    this.lastAutoSyncAt = startedAt;
+    if (res?.success) {
+      this.autoSyncFailureCount = 0;
+      this.autoSyncBackoffUntil = 0;
+    } else if (res?.error || (res?.stats?.errors || 0) > 0) {
+      this.autoSyncFailureCount++;
+      const backoff = autoSyncBackoffMs(this.autoSyncFailureCount);
+      this.autoSyncBackoffUntil = Date.now() + backoff;
+      this.engine.addLog("warn", `自动同步失败，${Math.round(backoff / 1000)} 秒内不再自动重试`);
+    } else {
+      // Conflicts or deletions waiting for review are not transient failures.
+      this.autoSyncFailureCount = 0;
+      this.autoSyncBackoffUntil = 0;
+    }
+    if ((res?.stats?.deferred || 0) > 0) this.scheduleAutoSync();
+    if (this.autoSyncPending) {
+      this.autoSyncPending = false;
+      this.scheduleAutoSync();
+    }
   }
 
   private needsSyncPathSetup(): boolean {
@@ -233,12 +319,17 @@ export default class BaiduSyncPlugin extends Plugin {
       new Notice("同步正在进行，请稍候");
       return;
     }
+    if (this.saveDebounceTimer !== null) {
+      window.clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
+    }
     new Notice("正在启动百度网盘同步...");
     const res = (await this.engine.startSync(false)) as {
       success: boolean;
       busy?: boolean;
       setupRequired?: boolean;
       cancelled?: boolean;
+      stats?: { deferred?: number };
     };
     if (this.engine.isSyncing() || res.busy) {
       new Notice("同步正在进行，请稍候");
@@ -246,7 +337,14 @@ export default class BaiduSyncPlugin extends Plugin {
     }
     if (res.setupRequired || res.cancelled) return;
     if (res.success) {
-      new Notice("百度网盘同步完成！");
+      this.autoSyncFailureCount = 0;
+      this.autoSyncBackoffUntil = 0;
+      new Notice(
+        (res.stats?.deferred || 0) > 0
+          ? "同步完成，但部分文件仍在变化，稍后会自动重试"
+          : "百度网盘同步完成！"
+      );
+      if ((res.stats?.deferred || 0) > 0) this.scheduleAutoSync();
     } else {
       new Notice("同步未完成，请查看同步日志");
     }
