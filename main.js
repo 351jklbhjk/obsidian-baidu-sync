@@ -42,6 +42,7 @@ var require_native_sync = __commonJS({
       if (typeof schedule !== "function") throw new Error("schedule dependency required");
       const sleep = (ms) => new Promise((r) => schedule(r, ms));
       const hasControl = (s) => Array.from(String(s)).some((ch) => ch.charCodeAt(0) < 32);
+      const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
       const fail = (message) => {
         throw new Error(message);
       };
@@ -65,6 +66,7 @@ var require_native_sync = __commonJS({
       const reserved = (p) => p === ".baidu-sync-index.json" || p.startsWith(".baidu-native-") || p.startsWith(".claudian/") || p === ".claudian" || p.startsWith(".agents/") || p === ".agents" || p.startsWith(".sync-vault/") || p === ".sync-vault";
       const stamp = (r) => r ? JSON.stringify([String(r.fsId), r.size, r.mtime, r.md5 || ""]) : null;
       const sameRemote = (a, b) => stamp(a) === stamp(b);
+      const validBaseline = (path, local, remote, base) => local?.path === path && typeof local.hash === "string" && /^[0-9a-f]{64}$/.test(local.hash) && remote?.path === path && remote.remotePath === base + "/" + path && remote.isdir === 0 && Number.isSafeInteger(remote.fsId) && remote.fsId > 0 && Number.isSafeInteger(remote.size) && remote.size >= 0 && Number.isFinite(remote.mtime);
       const labels = { ADOPT: "\u5185\u5BB9\u4E00\u81F4\uFF0C\u5EFA\u7ACB\u540C\u6B65\u8BB0\u5F55", VERIFY: "\u6838\u5BF9\u4E24\u7AEF\u5185\u5BB9", UPLOAD: "\u4E0A\u4F20\u672C\u5730\u4FEE\u6539", DOWNLOAD: "\u4E0B\u8F7D\u4E91\u7AEF\u4FEE\u6539", CONFLICT: "\u51B2\u7A81\uFF1A\u4FDD\u7559\u53CC\u65B9\u7248\u672C", MOVE_LOCAL: "\u540C\u6B65\u4E91\u7AEF\u91CD\u547D\u540D\u5230\u672C\u5730", MOVE_REMOTE: "\u540C\u6B65\u672C\u5730\u91CD\u547D\u540D\u5230\u4E91\u7AEF", DELETE_LOCAL: "\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9", DELETE_REMOTE: "\u79FB\u5165\u7F51\u76D8\u56DE\u6536\u7AD9", FORGET: "\u6E05\u7406\u5DF2\u4E0D\u5B58\u5728\u6587\u4EF6\u7684\u540C\u6B65\u8BB0\u5F55" };
       const itemLabel = (x) => x.action === "UPLOAD" && !x.remote ? "\u4E0A\u4F20\u672C\u5730\u65B0\u589E" : x.action === "DOWNLOAD" && !x.local ? "\u4E0B\u8F7D\u4E91\u7AEF\u65B0\u589E" : labels[x.action];
       const conflictChoices = { local: "\u4FDD\u7559\u672C\u5730", remote: "\u4FDD\u7559\u4E91\u7AEF", both: "\u4FDD\u7559\u53CC\u65B9", skip: "\u8DF3\u8FC7" };
@@ -287,12 +289,12 @@ var require_native_sync = __commonJS({
       }
       function plan(local, remote, baseline, base) {
         const out = [], used = /* @__PURE__ */ new Set();
-        const entries = Object.entries(baseline);
+        const entries = Object.entries(baseline), known = new Map(entries);
         for (const [old, b] of entries) {
           if (!b.local?.hash || !b.remote) continue;
           const l = local.get(old), r = remote.get(old);
           if (!l && r && sameRemote(r, b.remote)) {
-            const matches = [...local.values()].filter((x) => x.hash === b.local.hash && !baseline[x.path] && !remote.has(x.path) && !used.has(x.path));
+            const matches = [...local.values()].filter((x) => x.hash === b.local.hash && !known.has(x.path) && !remote.has(x.path) && !used.has(x.path));
             const baselineMatches = entries.filter(([, v]) => v.local?.hash === b.local.hash);
             if (matches.length === 1 && baselineMatches.length === 1) {
               const n = matches[0];
@@ -301,7 +303,7 @@ var require_native_sync = __commonJS({
               used.add(n.path);
             }
           } else if (l && !r && l.hash === b.local.hash && !old.startsWith(".")) {
-            const matches = [...remote.values()].filter((x) => String(x.fsId) === String(b.remote.fsId) && !baseline[x.path] && !local.has(x.path) && !used.has(x.path) && !x.path.startsWith("."));
+            const matches = [...remote.values()].filter((x) => String(x.fsId) === String(b.remote.fsId) && !known.has(x.path) && !local.has(x.path) && !used.has(x.path) && !x.path.startsWith("."));
             if (matches.length === 1 && sameRemote(matches[0], b.remote)) {
               const n = matches[0];
               out.push({ action: "MOVE_LOCAL", path: n.path, oldPath: old, local: l, remote: n });
@@ -312,7 +314,7 @@ var require_native_sync = __commonJS({
         }
         for (const path of /* @__PURE__ */ new Set([...local.keys(), ...remote.keys(), ...Object.keys(baseline)])) {
           if (used.has(path)) continue;
-          const l = local.get(path), r = remote.get(path), b = baseline[path];
+          const l = local.get(path), r = remote.get(path), b = known.get(path);
           let action;
           if (l && r) {
             if (!b?.local?.hash || !b.remote) action = "VERIFY";
@@ -380,10 +382,19 @@ var require_native_sync = __commonJS({
             state = { version: 2, scope, adopted: false, files: {}, uploads: {} };
             this.log("info", "\u9996\u6B21\u540C\u6B65\uFF1A\u6B63\u5728\u6838\u5BF9\u4E24\u7AEF\u6587\u4EF6");
           }
-          if (!state.files || !state.uploads) fail("\u672C\u5730\u540C\u6B65\u57FA\u7EBF\u4E0D\u5B8C\u6574");
-          for (const [p, b] of Object.entries(state.files)) {
-            relative(this.base + "/" + p, this.base);
-            if (!b.local?.hash || !b.remote || b.remote.remotePath !== this.base + "/" + p) fail("\u672C\u5730\u540C\u6B65\u57FA\u7EBF\u6761\u76EE\u65E0\u6548");
+          if (!isObject(state.files) || !isObject(state.uploads)) fail("\u672C\u5730\u540C\u6B65\u57FA\u7EBF\u4E0D\u5B8C\u6574");
+          state.files = Object.assign(/* @__PURE__ */ Object.create(null), state.files);
+          for (const [path, entry] of Object.entries(state.files)) {
+            try {
+              relative(this.base + "/" + path, this.base);
+            } catch {
+              delete state.files[path];
+              this.log("warn", "\u5DF2\u5FFD\u7565\u4E0D\u5B89\u5168\u7684\u672C\u5730\u57FA\u7EBF\u8DEF\u5F84\uFF1A" + JSON.stringify(path));
+              continue;
+            }
+            if (validBaseline(path, entry?.local, entry?.remote, this.base)) continue;
+            if (entry?.needsVerification !== true) this.log("warn", "\u540C\u6B65\u57FA\u7EBF\u6761\u76EE\u65E0\u6548\uFF0C\u5C06\u91CD\u65B0\u6838\u5BF9\uFF1A" + path);
+            state.files[path] = { needsVerification: true };
           }
           this.state = state;
           this.settings = { ...settings };
@@ -487,8 +498,12 @@ var require_native_sync = __commonJS({
           }
           fail("\u65E0\u6CD5\u5206\u914D\u51B2\u7A81\u6587\u4EF6\u540D");
         }
+        setBaseline(path, local, remote) {
+          if (!validBaseline(path, local, remote, this.base)) fail("\u65E0\u6CD5\u8BB0\u5F55\u672A\u7ECF\u6838\u5BF9\u7684\u540C\u6B65\u6761\u76EE\uFF1A" + path);
+          this.state.files[path] = { local, remote };
+        }
         async record(path, l, r) {
-          this.state.files[path] = { local: l, remote: r };
+          this.setBaseline(path, l, r);
           await this.persist();
         }
         async loadRenames() {
@@ -551,11 +566,12 @@ var require_native_sync = __commonJS({
           fail("\u4E91\u7AEF\u6587\u4EF6\u5939\u91CD\u547D\u540D\u5C1A\u672A\u5B8C\u6210\uFF0C\u4FDD\u7559\u8BB0\u5F55\u5F85\u91CD\u8BD5");
         }
         async rebaseAfterRename(e, moved) {
+          if (moved.isdir !== (e.kind === "folder" ? 1 : 0)) fail("\u4E91\u7AEF\u65B0\u8DEF\u5F84\u7C7B\u578B\u4E0E\u91CD\u547D\u540D\u8BB0\u5F55\u4E0D\u7B26\uFF1A" + e.newPath);
           if (e.kind === "file") {
             const b = this.state.files[e.oldPath];
-            delete this.state.files[e.oldPath];
             if (b) {
-              this.state.files[e.newPath] = { local: { ...b.local, path: e.newPath }, remote: { ...moved, path: e.newPath, remotePath: this.base + "/" + e.newPath } };
+              this.setBaseline(e.newPath, { ...b.local, path: e.newPath }, { ...moved, path: e.newPath, remotePath: this.base + "/" + e.newPath });
+              delete this.state.files[e.oldPath];
               await this.persist();
               return;
             }
@@ -579,14 +595,19 @@ var require_native_sync = __commonJS({
             const newKey = newPrefix + key.slice(oldPrefix.length);
             const b = this.state.files[key];
             const fresh = actual.get(newKey.slice(newPrefix.length + 1)) || b.remote;
+            this.setBaseline(newKey, { ...b.local, path: newKey }, { ...fresh, path: newKey, remotePath: this.base + "/" + newKey });
             delete this.state.files[key];
-            this.state.files[newKey] = { local: { ...b.local, path: newKey }, remote: { ...fresh, path: newKey, remotePath: this.base + "/" + newKey } };
             movedKeys.push(newKey);
           }
           await this.persist();
           if (movedKeys.length) this.log("info", `\u5DF2\u8FC1\u79FB ${movedKeys.length} \u4E2A\u6587\u4EF6\u7684\u91CD\u547D\u540D\u57FA\u7EBF`);
         }
         async applyRename(e) {
+          const touchesPath = (path) => path === e.oldPath || path === e.newPath || e.kind === "folder" && (path.startsWith(e.oldPath + "/") || path.startsWith(e.newPath + "/"));
+          if (Object.entries(this.state.files).some(([path, entry]) => entry.needsVerification && touchesPath(path))) {
+            this.log("warn", "\u91CD\u547D\u540D\u6D89\u53CA\u5F85\u6838\u5BF9\u7684\u540C\u6B65\u6761\u76EE\uFF0C\u6309\u5F53\u524D\u4E24\u7AEF\u5185\u5BB9\u540C\u6B65\uFF1A" + e.oldPath + " \u2192 " + e.newPath);
+            return false;
+          }
           const oldLocal = await this.adapter.exists(e.oldPath), newLocal = await this.adapter.exists(e.newPath);
           if (!oldLocal && !newLocal) {
             this.log("warn", "\u672C\u5730\u65E7\u8DEF\u5F84\u548C\u65B0\u8DEF\u5F84\u90FD\u4E0D\u5B58\u5728\uFF0C\u4E22\u5F03\u91CD\u547D\u540D\u8BB0\u5F55\uFF1A" + e.oldPath);
@@ -643,6 +664,8 @@ var require_native_sync = __commonJS({
           if (remaining.length) fail(`\u6709 ${remaining.length} \u4E2A\u91CD\u547D\u540D\u5F85\u5904\u7406\uFF0C\u5DF2\u505C\u6B62\u672C\u6B21\u540C\u6B65`);
         }
         async put(path, buffer, expectedLocal, expectedRemote) {
+          const uploadedHash = await hash(buffer);
+          if (!expectedLocal || expectedLocal.hash !== uploadedHash) fail("\u4E0A\u4F20\u524D\u672C\u5730\u6587\u4EF6\u53D8\u5316\uFF1A" + path);
           await this.checkLocal(path, expectedLocal);
           await this.parents(path, true);
           await this.checkRemote(path, expectedRemote);
@@ -653,10 +676,10 @@ var require_native_sync = __commonJS({
           const r = await this.api.lookup(this.base + "/" + path, this.base);
           if (!r) fail("\u4E0A\u4F20\u540E\u6587\u4EF6\u4E0D\u5B58\u5728");
           const verified = await this.api.download(r, this.settings);
-          if (await hash(verified) !== await hash(buffer)) fail("\u4E0A\u4F20\u540E\u5185\u5BB9\u6821\u9A8C\u5931\u8D25");
-          await this.checkLocal(path, expectedLocal);
+          if (await hash(verified) !== uploadedHash) fail("\u4E0A\u4F20\u540E\u5185\u5BB9\u6821\u9A8C\u5931\u8D25");
+          const local = await this.checkLocal(path, expectedLocal);
           await this.checkRemote(path, r);
-          await this.record(path, await this.localFile(path), r);
+          await this.record(path, local, r);
         }
         async execute(x) {
           if (this.stopped) fail("\u63D2\u4EF6\u5DF2\u5378\u8F7D\uFF0C\u505C\u6B62\u540C\u6B65");
@@ -709,7 +732,6 @@ var require_native_sync = __commonJS({
           }
           if (x.action === "UPLOAD") {
             const b = await this.adapter.readBinary(x.path);
-            if (await hash(b) !== x.local.hash) fail("\u4E0A\u4F20\u524D\u672C\u5730\u6587\u4EF6\u53D8\u5316");
             await this.put(x.path, b, x.local, x.remote);
             return;
           }
@@ -868,7 +890,7 @@ var require_native_sync = __commonJS({
             e.setState("syncing", "\u6267\u884C\u53CC\u5411\u540C\u6B65");
             const adopted = items.filter((x) => x.action === "ADOPT");
             if (adopted.length) {
-              for (const x of adopted) this.state.files[x.path] = { local: x.local, remote: x.remote };
+              for (const x of adopted) this.setBaseline(x.path, x.local, x.remote);
               await this.persist();
               stats.adopted = adopted.length;
               this.log("info", `\u5185\u5BB9\u4E00\u81F4\uFF1A${stats.adopted} \u9879\uFF0C\u5DF2\u5EFA\u7ACB\u540C\u6B65\u8BB0\u5F55`);

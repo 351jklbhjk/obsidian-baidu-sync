@@ -6,10 +6,11 @@ const fs=require('node:fs'),vm=require('node:vm');
 const bytes=s=>Uint8Array.from(Buffer.from(s)).buffer;
 const text=b=>Buffer.from(b).toString();
 const md5=b=>createHash('md5').update(Buffer.from(b)).digest('hex');
+const sha256=s=>createHash('sha256').update(s).digest('hex');
 const deps={crypto:()=>webcrypto,md5,isEncrypted:()=>false,encryptData:async b=>b,decryptData:async b=>b,buildMultipartFormData:b=>({body:b,contentType:'multipart/form-data'}),requestUrl:async()=>{throw Error('no mock')},schedule:setTimeout};
 const N=createNativeSync(deps);
 const r=(path='a.md',id=1,rev='opaque',size=3)=>({path,remotePath:'/root/'+path,fsId:id,size,mtime:1000,md5:rev,isdir:0});
-const l=(path='a.md',hash='same')=>({path,hash,mtime:100,size:3});
+const l=(path='a.md',contents='same')=>({path,hash:sha256(contents),mtime:100,size:3});
 const baseline=(path='a.md')=>({[path]:{local:l(path),remote:r(path)}});
 const actions=(ls,rs,b=baseline())=>N.plan(new Map(ls.map(x=>[x.path,x])),new Map(rs.map(x=>[x.path,x])),b,'/root');
 test('three-way planner uses local content and cloud revision, never cloud MD5 as local MD5',()=>{
@@ -154,6 +155,42 @@ test('conflicting revisions create a separate file before replacing cloud origin
 test('download with local edits during transfer aborts, preserving local contents',async()=>{
  const {runner,adapter,files}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md');runner.api.lookup=async()=>r();runner.api.download=async()=>{await adapter.writeBinary('a.md',bytes('user typing'));return bytes('remote')};await assert.rejects(()=>runner.execute({action:'DOWNLOAD',path:'a.md',local,remote:r()}));assert.equal(text(files.get('a.md').b),'user typing');
 });
+test('upload saves the verified bytes when another local edit follows the final local check', async () => {
+ const {runner, adapter} = fixture();
+ const path = 'a.md';
+ await adapter.writeBinary(path, bytes('abc'));
+ const local = await runner.localFile(path);
+ const revision = r(path);
+ let remote = null, uploaded, editOnLookup = false;
+ runner.api.lookup = async () => {
+  if (editOnLookup) {
+   editOnLookup = false;
+   await adapter.writeBinary(path, bytes('newer edit'));
+  }
+  return remote;
+ };
+ runner.api.upload = async (destination, buffer, settings, journal, persist, beforeCommit) => {
+  assert.equal(destination, revision.remotePath);
+  await beforeCommit();
+  uploaded = buffer;
+  remote = revision;
+ };
+ runner.api.download = async () => {
+  editOnLookup = true;
+  return uploaded;
+ };
+ await runner.execute({action:'UPLOAD', path, local});
+ assert.equal(await adapter.read(path), 'newer edit');
+ assert.equal(text(uploaded), 'abc');
+ const saved = JSON.parse(await adapter.read(runner.statePath));
+ assert.deepEqual(saved.files[path], {local, remote:revision});
+
+ runner.api.listAll = async () => new Map([[path, revision]]);
+ runner.api.download = async () => uploaded;
+ const [next] = await runner.scan();
+ assert.equal(next.action, 'UPLOAD');
+ assert.equal(next.local.hash, sha256('newer edit'));
+});
 test('first background run is preview only; no baseline adoption or file transfers',async()=>{
  const {runner}=fixture();runner.load=async()=>{runner.state.adopted=false;};runner.scan=async()=>[{action:'UPLOAD',path:'a.md'}];runner.execute=async()=>{throw Error('must not run')};const result=await runner.run({silent:true});assert(result.preview);assert(!runner.state.adopted);
 });
@@ -209,7 +246,7 @@ test('timestamp-only local change causes no transfer',async()=>{
 test('equal current content adopts stale local, remote, or both baselines',async()=>{
  for(const mode of ['local','remote','both']){
   const {runner,adapter}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md'),remote=r();
-  runner.state.files={'a.md':{local:{...local,hash:mode==='remote'?local.hash:'old'},remote:mode==='local'?remote:{...remote,mtime:0}}};
+  runner.state.files={'a.md':{local:{...local,hash:mode==='remote'?local.hash:sha256('old')},remote:mode==='local'?remote:{...remote,mtime:0}}};
   runner.api.listAll=async()=>new Map([['a.md',remote]]);runner.api.lookup=async()=>remote;runner.api.download=async()=>bytes('abc');
   assert.equal((await runner.scan())[0].action,'ADOPT');
  }
@@ -217,7 +254,7 @@ test('equal current content adopts stale local, remote, or both baselines',async
 test('different content preserves upload/download/conflict directions',async()=>{
  for(const mode of ['UPLOAD','DOWNLOAD','CONFLICT','VERIFY']){
   const {runner,adapter}=fixture();await adapter.writeBinary('a.md',bytes('abc'));const local=await runner.localFile('a.md'),remote=r();
-  runner.state.files=mode==='VERIFY'?{}:{'a.md':{local:{...local,hash:mode==='DOWNLOAD'?local.hash:'old'},remote:mode==='UPLOAD'?remote:{...remote,mtime:0}}};
+  runner.state.files=mode==='VERIFY'?{}:{'a.md':{local:{...local,hash:mode==='DOWNLOAD'?local.hash:sha256('old')},remote:mode==='UPLOAD'?remote:{...remote,mtime:0}}};
   runner.api.listAll=async()=>new Map([['a.md',remote]]);runner.api.lookup=async()=>remote;runner.api.download=async()=>bytes('xyz');
   assert.equal((await runner.scan())[0].action,mode==='VERIFY'?'CONFLICT':mode);
  }
@@ -254,7 +291,31 @@ test('concurrent rename events are serialized and do not overwrite the journal',
  const {runner}=fixture();await Promise.all([runner.recordRename('A.md','B.md','file'),runner.recordRename('C.md','D.md','file'),runner.recordRename('E.md','F.md','file')]);const got=(await runner.loadRenames()).map(e=>e.oldPath).sort();assert.deepEqual(got,['A.md','C.md','E.md']);
 });
 test('file rename journal uses the cloud rename API and rebases the baseline',async()=>{
- const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));const oldRemote={path:'A.md',remotePath:'/root/A.md',fsId:123,size:3,mtime:1,md5:'old',isdir:0};const newRemote={...oldRemote,path:'B.md',remotePath:'/root/B.md'};let moved=false;runner.api.lookup=async p=>p==='/root/A.md'?(moved?null:oldRemote):p==='/root/B.md'?(moved?newRemote:null):null;runner.api.manage=async(op,items,opts)=>{assert.equal(op,'rename');assert.equal(items[0].newname,'B.md');assert.equal(opts.allowTask,false);moved=true;return{errno:0,info:[{errno:0,path:'/root/A.md'}]}};runner.state={version:2,files:{'A.md':{local:l('A.md','oldhash'),remote:oldRemote}},uploads:{}};await runner.applyRename({oldPath:'A.md',newPath:'B.md',kind:'file'});assert(!runner.state.files['A.md']);assert.equal(runner.state.files['B.md'].remote.fsId,123);assert.equal(runner.state.files['B.md'].local.hash,'oldhash');
+ const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));const oldRemote={path:'A.md',remotePath:'/root/A.md',fsId:123,size:3,mtime:1,md5:'old',isdir:0};const newRemote={...oldRemote,path:'B.md',remotePath:'/root/B.md'};let moved=false;runner.api.lookup=async p=>p==='/root/A.md'?(moved?null:oldRemote):p==='/root/B.md'?(moved?newRemote:null):null;runner.api.manage=async(op,items,opts)=>{assert.equal(op,'rename');assert.equal(items[0].newname,'B.md');assert.equal(opts.allowTask,false);moved=true;return{errno:0,info:[{errno:0,path:'/root/A.md'}]}};runner.state={version:2,files:{'A.md':{local:l('A.md','abc'),remote:oldRemote}},uploads:{}};await runner.applyRename({oldPath:'A.md',newPath:'B.md',kind:'file'});assert(!runner.state.files['A.md']);assert.equal(runner.state.files['B.md'].remote.fsId,123);assert.equal(runner.state.files['B.md'].local.hash,sha256('abc'));
+});
+test('a file rename with a cloud directory at its destination keeps the old baseline and journal', async () => {
+ const {runner, adapter} = fixture();
+ const blocked = {oldPath:'A.md', newPath:'B.md', kind:'file'};
+ const completed = {oldPath:'C.md', newPath:'D.md', kind:'file'};
+ await adapter.writeBinary(blocked.newPath, bytes('abc'));
+ await adapter.writeBinary(completed.newPath, bytes('def'));
+ const oldRecord = {local:l(blocked.oldPath, 'abc'), remote:r(blocked.oldPath, 1)};
+ runner.state.files = {
+  [blocked.oldPath]:oldRecord,
+  [completed.oldPath]:{local:l(completed.oldPath, 'def'), remote:r(completed.oldPath, 2)}
+ };
+ const destinationDirectory = {...r(blocked.newPath, 3, '', 0), isdir:1};
+ const lookup = new Map([[blocked.newPath, destinationDirectory], [completed.newPath, r(completed.newPath, 2)]]);
+ runner.api.lookup = async path => lookup.get(N.relative(path, '/root')) || null;
+ await runner.saveRenames([blocked, completed]);
+
+ await assert.rejects(() => runner.applyRenames(), /有 1 个重命名待处理/);
+ const saved = JSON.parse(await adapter.read(runner.statePath));
+ assert.deepEqual(saved.files[blocked.oldPath], oldRecord);
+ assert(!Object.hasOwn(saved.files, blocked.newPath));
+ assert(!Object.hasOwn(saved.files, completed.oldPath));
+ assert.equal(saved.files[completed.newPath].remote.fsId, 2);
+ assert.deepEqual(await runner.loadRenames(), [blocked]);
 });
 test('never-uploaded file rename is dropped as a new file',async()=>{
  const {runner,adapter}=fixture();runner.base='/root';await adapter.writeBinary('B.md',bytes('abc'));runner.api.lookup=async()=>null;let manageCalls=0;runner.api.manage=async()=>{manageCalls++;throw Error('must not call filemanager')};
@@ -273,6 +334,106 @@ test('folder rename rebases all baseline paths under the old prefix',async()=>{
 });
 test('state write failures propagate and corrupt state never silently resets',async()=>{
  const {runner,adapter}=fixture();adapter.write=async()=>{throw Error('disk full')};await assert.rejects(()=>runner.persist());adapter.exists=async()=>true;adapter.read=async()=>'{broken';runner.api.request=async()=>({errno:0,uk:123});await assert.rejects(()=>runner.load({remoteBasePath:'/root',appKey:'key'}));
+});
+
+async function seedState(runner, adapter, entries) {
+ const state = {version:2, scope:JSON.stringify(['123','/root','key',false]), adopted:true, files:entries, uploads:{}};
+ await adapter.write(runner.statePath, JSON.stringify(state));
+ runner.api.request = async () => ({errno:0, uk:123});
+}
+
+test('background sync recovers individual invalid records and completes unrelated transfers', async () => {
+ const {runner, adapter} = fixture();
+ const cloud = new Map(), payloads = new Map();
+ for (const [path, value] of [['healthy.md','unchanged'], ['equal.md','same'], ['conflict.md','cloud'], ['new.md','new']]) {
+  cloud.set(path, r(path, cloud.size + 1, 'revision', bytes(value).byteLength));
+  payloads.set(path, bytes(value));
+ }
+ for (const [path, value] of [['healthy.md','unchanged'], ['equal.md','same'], ['conflict.md','local']]) {
+  await adapter.writeBinary(path, bytes(value));
+ }
+ const healthy = {local:await runner.localFile('healthy.md'), remote:cloud.get('healthy.md')};
+ await seedState(runner, adapter, {
+  'healthy.md':healthy,
+  'equal.md':null,
+  'conflict.md':{local:await runner.localFile('conflict.md'), remote:cloud.get('healthy.md')},
+  '../unsafe.md':null
+ });
+ runner.api.listAll = async () => cloud;
+ runner.api.lookup = async p => cloud.get(N.relative(p, '/root')) || null;
+ const downloaded = [];
+ runner.api.download = async file => {downloaded.push(file.path); return payloads.get(file.path);};
+ runner.api.manage = async () => assert.fail('no cloud move or deletion expected');
+ runner.api.upload = async () => assert.fail('no cloud overwrite expected');
+ const result = await runner.run({silent:true});
+ assert.equal(result.stats.errors, 0, result.error);
+ assert.equal(result.stats.conflicts, 1);
+ assert.equal(result.stats.adopted, 1);
+ assert.equal(result.stats.downloaded, 1);
+ assert.equal(result.stats.deleted, 0);
+ assert.equal(await adapter.read('conflict.md'), 'local');
+ assert.equal(await adapter.read('new.md'), 'new');
+ assert(!downloaded.includes('healthy.md'));
+ const saved = JSON.parse(await adapter.read(runner.statePath));
+ assert.deepEqual(saved.files['healthy.md'], healthy);
+ assert.equal(saved.files['equal.md'].remote.remotePath, '/root/equal.md');
+ assert.equal(saved.files['equal.md'].local.hash, await N.hash(bytes('same')));
+ assert(!Object.hasOwn(saved.files, '../unsafe.md'));
+ // A subsequent run uses the repaired baseline and keeps the outstanding conflict.
+ downloaded.length = 0;
+ const again = await runner.run({silent:true});
+ assert.equal(again.stats.errors, 0, again.error);
+ assert.equal(again.stats.conflicts, 1);
+ assert.deepEqual(downloaded, ['conflict.md']);
+});
+
+test('damaged single-sided paths are neither deleted nor used as rename destinations', async () => {
+ const {runner, adapter} = fixture();
+ await adapter.writeBinary('damaged-local.md', bytes('duplicate'));
+ const duplicate = await runner.localFile('damaged-local.md');
+ const old = r('healthy-old.md', 15, 'old');
+ const remoteOnly = r('damaged-remote.md', 29, 'remote-only');
+ const cloud = new Map([[old.path,old], [remoteOnly.path,remoteOnly]]);
+ await seedState(runner, adapter, {
+  'healthy-old.md':{local:{...duplicate, path:'healthy-old.md'}, remote:old},
+  'damaged-local.md':{local:duplicate, remote:r('unrelated.md')},
+  'damaged-remote.md':{local:{path:'damaged-remote.md'}, remote:remoteOnly}
+ });
+ runner.api.listAll = async () => cloud;
+ const preview = await runner.run({preview:true});
+ assert.equal(preview.success, true, preview.error);
+ const plan = new Map(preview.items.map(item => [item.path,item.action]));
+ assert.equal(plan.get('damaged-local.md'), 'UPLOAD');
+ assert.equal(plan.get('damaged-remote.md'), 'DOWNLOAD');
+ assert.equal(plan.get('healthy-old.md'), 'DELETE_REMOTE');
+ assert(!preview.items.some(item => item.action.startsWith('MOVE_')));
+});
+test('malformed local SHA-256 strings trigger verification and block automatic upload', async () => {
+ const {runner, adapter} = fixture();
+ const localFiles = ['short.md', 'invalid-hex.md'];
+ const invalidHashes = ['abc123', 'z'.repeat(64)];
+ const records = {}, cloud = new Map();
+ for (const [index, path] of localFiles.entries()) {
+  await adapter.writeBinary(path, bytes('local'));
+  const remote = r(path, index + 1, 'cloud', 5);
+  const local = await runner.localFile(path);
+  records[path] = {local:{...local, hash:invalidHashes[index]}, remote};
+  cloud.set(path, remote);
+ }
+ await seedState(runner, adapter, records);
+ runner.api.listAll = async () => cloud;
+ runner.api.lookup = async path => cloud.get(N.relative(path, '/root')) || null;
+ runner.api.download = async () => bytes('cloud');
+ runner.api.upload = async () => assert.fail('an invalid baseline must not authorize automatic upload');
+
+ const result = await runner.run({silent:true});
+ assert.equal(result.stats.errors, 0, result.error);
+ assert.equal(result.stats.conflicts, localFiles.length);
+ assert.equal(result.stats.uploaded, 0);
+ for (const path of localFiles) {
+  assert.equal(await adapter.read(path), 'local');
+  assert.deepEqual(runner.state.files[path], {needsVerification:true});
+ }
 });
 test('bundle exports plugin and routes sync through the native reconciler',async()=>{
  const bundle=fs.readFileSync(__dirname+'/../main.js','utf8');

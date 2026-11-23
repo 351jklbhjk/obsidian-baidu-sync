@@ -5,6 +5,7 @@ function createNativeSync(deps) {
   if (typeof schedule !== "function") throw new Error("schedule dependency required");
   const sleep = ms => new Promise(r => schedule(r, ms));
   const hasControl = s => Array.from(String(s)).some(ch => ch.charCodeAt(0) < 32);
+  const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const fail = message => { throw new Error(message); };
   const safeError = e => String(e?.message || e).replace(/(access_token|refresh_token|client_secret)=[^&\s]+/gi, '$1=[redacted]');
   const isLocalChangeError = e => /本地文件(在扫描后变化|正在变化)|上传前本地文件变化|本地原文已变化/.test(safeError(e));
@@ -26,6 +27,11 @@ function createNativeSync(deps) {
   const reserved = p => p === '.baidu-sync-index.json' || p.startsWith('.baidu-native-') || p.startsWith('.claudian/') || p === '.claudian' || p.startsWith('.agents/') || p === '.agents' || p.startsWith('.sync-vault/') || p === '.sync-vault';
   const stamp = r => r ? JSON.stringify([String(r.fsId), r.size, r.mtime, r.md5 || '']) : null;
   const sameRemote = (a,b) => stamp(a) === stamp(b);
+  const validBaseline = (path, local, remote, base) =>
+    local?.path === path && typeof local.hash === 'string' && /^[0-9a-f]{64}$/.test(local.hash) &&
+    remote?.path === path && remote.remotePath === base + '/' + path &&
+    remote.isdir === 0 && Number.isSafeInteger(remote.fsId) && remote.fsId > 0 &&
+    Number.isSafeInteger(remote.size) && remote.size >= 0 && Number.isFinite(remote.mtime);
   const labels={ADOPT:'内容一致，建立同步记录',VERIFY:'核对两端内容',UPLOAD:'上传本地修改',DOWNLOAD:'下载云端修改',CONFLICT:'冲突：保留双方版本',MOVE_LOCAL:'同步云端重命名到本地',MOVE_REMOTE:'同步本地重命名到云端',DELETE_LOCAL:'移入本地回收站',DELETE_REMOTE:'移入网盘回收站',FORGET:'清理已不存在文件的同步记录'};
   const itemLabel = x => x.action==='UPLOAD'&&!x.remote?'上传本地新增':x.action==='DOWNLOAD'&&!x.local?'下载云端新增':labels[x.action];
   const conflictChoices={local:'保留本地',remote:'保留云端',both:'保留双方',skip:'跳过'};
@@ -177,22 +183,22 @@ function createNativeSync(deps) {
   }
 
   function plan(local,remote,baseline,base) {
-    const out=[],used=new Set();const entries=Object.entries(baseline);
+    const out=[],used=new Set();const entries=Object.entries(baseline),known=new Map(entries);
     // Only unambiguous unchanged-content renames are optimized. Other cases reconcile as add/delete.
     for(const [old,b] of entries) {
       if(!b.local?.hash || !b.remote) continue;
       const l=local.get(old),r=remote.get(old);
       if(!l && r && sameRemote(r,b.remote)) {
-        const matches=[...local.values()].filter(x=>x.hash===b.local.hash && !baseline[x.path] && !remote.has(x.path) && !used.has(x.path));
+        const matches=[...local.values()].filter(x=>x.hash===b.local.hash && !known.has(x.path) && !remote.has(x.path) && !used.has(x.path));
         const baselineMatches=entries.filter(([,v])=>v.local?.hash===b.local.hash);
         if(matches.length===1 && baselineMatches.length===1){const n=matches[0];out.push({action:'MOVE_REMOTE',path:n.path,oldPath:old,local:n,remote:r});used.add(old);used.add(n.path);}
       } else if(l && !r && l.hash===b.local.hash && !old.startsWith('.')) {
-        const matches=[...remote.values()].filter(x=>String(x.fsId)===String(b.remote.fsId) && !baseline[x.path] && !local.has(x.path) && !used.has(x.path) && !x.path.startsWith('.'));
+        const matches=[...remote.values()].filter(x=>String(x.fsId)===String(b.remote.fsId) && !known.has(x.path) && !local.has(x.path) && !used.has(x.path) && !x.path.startsWith('.'));
         if(matches.length===1 && sameRemote(matches[0],b.remote)) {const n=matches[0];out.push({action:'MOVE_LOCAL',path:n.path,oldPath:old,local:l,remote:n});used.add(old);used.add(n.path);}
       }
     }
     for(const path of new Set([...local.keys(),...remote.keys(),...Object.keys(baseline)])) {
-      if(used.has(path))continue;const l=local.get(path),r=remote.get(path),b=baseline[path];let action;
+      if(used.has(path))continue;const l=local.get(path),r=remote.get(path),b=known.get(path);let action;
       if(l && r) {
         if(!b?.local?.hash || !b.remote) action='VERIFY';
         else { const lc=l.hash!==b.local.hash,rc=!sameRemote(r,b.remote);
@@ -231,8 +237,17 @@ function createNativeSync(deps) {
       if(await this.adapter.exists(this.statePath)) {try{state=JSON.parse(await this.adapter.read(this.statePath));}catch{fail('本地同步基线损坏，请先恢复 native-state.json');}}
       if(state && state.version!==2)fail('本地同步基线版本不支持');
       if(!state || state.scope!==scope) {state={version:2,scope,adopted:false,files:{},uploads:{}};this.log('info','首次同步：正在核对两端文件');}
-      if(!state.files || !state.uploads)fail('本地同步基线不完整');
-      for(const [p,b] of Object.entries(state.files)) {relative(this.base+'/'+p,this.base);if(!b.local?.hash||!b.remote||b.remote.remotePath!==this.base+'/'+p)fail('本地同步基线条目无效');}
+      if(!isObject(state.files) || !isObject(state.uploads))fail('本地同步基线不完整');
+      state.files=Object.assign(Object.create(null),state.files);
+      for(const [path,entry] of Object.entries(state.files)) {
+        try {relative(this.base+'/'+path,this.base);}
+        catch {delete state.files[path];this.log('warn','已忽略不安全的本地基线路径：'+JSON.stringify(path));continue;}
+        if(validBaseline(path,entry?.local,entry?.remote,this.base))continue;
+        // Keep the key reserved so neither rename inference nor the rename journal
+        // can consume this path before its current contents have been reconciled.
+        if(entry?.needsVerification!==true)this.log('warn','同步基线条目无效，将重新核对：'+path);
+        state.files[path]={needsVerification:true};
+      }
       this.state=state;this.settings={...settings};this.e.filter.updateSettings(settings);
     }
     ignored(p){const stateRoot=this.app.vault.configDir+'/baidu-sync';return p===stateRoot||p.startsWith(stateRoot+'/')||reserved(p)||this.e.filter.shouldIgnore(p);}
@@ -289,7 +304,11 @@ function createNativeSync(deps) {
       for(let i=0;i<10;i++){const p=`${stem} (${kind}-${Date.now()}-${Math.random().toString(36).slice(2,8)})${ext}`;if(!await this.adapter.exists(p)&&!await this.api.lookup(this.base+'/'+p,this.base))return p;}
       fail('无法分配冲突文件名');
     }
-    async record(path,l,r){this.state.files[path]={local:l,remote:r};await this.persist();}
+    setBaseline(path,local,remote){
+      if(!validBaseline(path,local,remote,this.base))fail('无法记录未经核对的同步条目：'+path);
+      this.state.files[path]={local,remote};
+    }
+    async record(path,l,r){this.setBaseline(path,l,r);await this.persist();}
     async loadRenames(){
       await this.ensureStateDir();
       if(!await this.adapter.exists(this.renamesPath) && await this.adapter.exists(this.legacyRenamesPath))await this.adapter.write(this.renamesPath,await this.adapter.read(this.legacyRenamesPath));
@@ -324,9 +343,13 @@ function createNativeSync(deps) {
       fail('云端文件夹重命名尚未完成，保留记录待重试');
     }
     async rebaseAfterRename(e,moved){
+      if(moved.isdir!==(e.kind==='folder'?1:0))fail('云端新路径类型与重命名记录不符：'+e.newPath);
       if(e.kind==='file'){
-        const b=this.state.files[e.oldPath];delete this.state.files[e.oldPath];
-        if(b){this.state.files[e.newPath]={local:{...b.local,path:e.newPath},remote:{...moved,path:e.newPath,remotePath:this.base+'/'+e.newPath}};await this.persist();return;}
+        const b=this.state.files[e.oldPath];
+        if(b){
+          this.setBaseline(e.newPath,{...b.local,path:e.newPath},{...moved,path:e.newPath,remotePath:this.base+'/'+e.newPath});
+          delete this.state.files[e.oldPath];await this.persist();return;
+        }
         if(this.state.files[e.newPath])return;
         const lf=await this.localFile(e.newPath);if(!lf)return;const bytes=await this.adapter.readBinary(e.newPath);await this.put(e.newPath,bytes,lf,moved);return;
       }
@@ -336,12 +359,17 @@ function createNativeSync(deps) {
         if(!key.startsWith(oldPrefix+'/'))continue;
         const newKey=newPrefix+key.slice(oldPrefix.length);const b=this.state.files[key];
         const fresh=actual.get(newKey.slice(newPrefix.length+1))||b.remote;
-        delete this.state.files[key];this.state.files[newKey]={local:{...b.local,path:newKey},remote:{...fresh,path:newKey,remotePath:this.base+'/'+newKey}};movedKeys.push(newKey);
+        this.setBaseline(newKey,{...b.local,path:newKey},{...fresh,path:newKey,remotePath:this.base+'/'+newKey});delete this.state.files[key];movedKeys.push(newKey);
       }
       await this.persist();
       if(movedKeys.length)this.log('info',`已迁移 ${movedKeys.length} 个文件的重命名基线`);
     }
     async applyRename(e){
+      const touchesPath=path=>path===e.oldPath || path===e.newPath || (e.kind==='folder' && (path.startsWith(e.oldPath+'/')||path.startsWith(e.newPath+'/')));
+      if(Object.entries(this.state.files).some(([path,entry])=>entry.needsVerification && touchesPath(path))){
+        this.log('warn','重命名涉及待核对的同步条目，按当前两端内容同步：'+e.oldPath+' → '+e.newPath);
+        return false;
+      }
       const oldLocal=await this.adapter.exists(e.oldPath),newLocal=await this.adapter.exists(e.newPath);
       if(!oldLocal&&!newLocal){this.log('warn','本地旧路径和新路径都不存在，丢弃重命名记录：'+e.oldPath);return false;}
       if(oldLocal)fail('本地旧路径仍然存在，不能确认重命名：'+e.oldPath);
@@ -384,14 +412,16 @@ function createNativeSync(deps) {
       if(remaining.length)fail(`有 ${remaining.length} 个重命名待处理，已停止本次同步`);
     }
     async put(path,buffer,expectedLocal,expectedRemote) {
+      const uploadedHash=await hash(buffer);
+      if(!expectedLocal || expectedLocal.hash!==uploadedHash)fail('上传前本地文件变化：'+path);
       await this.checkLocal(path,expectedLocal);await this.parents(path,true);await this.checkRemote(path,expectedRemote);
       await this.api.upload(this.base+'/'+path,buffer,this.settings,this.state.uploads,()=>this.persist(),async()=>{await this.checkLocal(path,expectedLocal);await this.checkRemote(path,expectedRemote);});
       const r=await this.api.lookup(this.base+'/'+path,this.base);if(!r)fail('上传后文件不存在');
       // Opaque cloud MD5 cannot validate local bytes. Verify by native download + plaintext SHA-256.
       const verified=await this.api.download(r,this.settings);
-      if(await hash(verified)!==await hash(buffer))fail('上传后内容校验失败');
-      await this.checkLocal(path,expectedLocal);await this.checkRemote(path,r);
-      await this.record(path,await this.localFile(path),r);
+      if(await hash(verified)!==uploadedHash)fail('上传后内容校验失败');
+      const local=await this.checkLocal(path,expectedLocal);await this.checkRemote(path,r);
+      await this.record(path,local,r);
     }
     async execute(x) {
       if(this.stopped)fail('插件已卸载，停止同步');
@@ -419,7 +449,7 @@ function createNativeSync(deps) {
         delete this.state.files[x.path];await this.persist();return;
       }
       if(x.action==='DELETE_REMOTE'){await this.api.manage('delete',[x.remotePath]);delete this.state.files[x.path];await this.persist();return;}
-      if(x.action==='UPLOAD') {const b=await this.adapter.readBinary(x.path);if(await hash(b)!==x.local.hash)fail('上传前本地文件变化');await this.put(x.path,b,x.local,x.remote);return;}
+      if(x.action==='UPLOAD') {const b=await this.adapter.readBinary(x.path);await this.put(x.path,b,x.local,x.remote);return;}
       const bytes=await this.api.download(x.remote,this.settings),h=await hash(bytes);
       await this.checkLocal(x.path,x.local);await this.checkRemote(x.path,x.remote);
       if(x.local?.hash===h){await this.record(x.path,x.local,x.remote);return;}
@@ -501,7 +531,7 @@ function createNativeSync(deps) {
         if(confirm && (firstTransfers||items.some(x=>x.action.startsWith('DELETE_'))) && !await this.confirm(items)){e.setState('idle','已取消');return {success:false,cancelled:true};}
         e.setState('syncing','执行双向同步');
         const adopted=items.filter(x=>x.action==='ADOPT');
-        if(adopted.length){for(const x of adopted)this.state.files[x.path]={local:x.local,remote:x.remote};await this.persist();stats.adopted=adopted.length;this.log('info',`内容一致：${stats.adopted} 项，已建立同步记录`);}
+        if(adopted.length){for(const x of adopted)this.setBaseline(x.path,x.local,x.remote);await this.persist();stats.adopted=adopted.length;this.log('info',`内容一致：${stats.adopted} 项，已建立同步记录`);}
         for(const x of items){
           if(x.action==='ADOPT')continue;
           if(x.action.startsWith('DELETE_') && !confirm){stats.pending++;this.log('warn','删除待手动确认：'+x.path);continue;}
